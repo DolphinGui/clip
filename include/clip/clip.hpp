@@ -1,4 +1,4 @@
-
+#include <iterator>
 #include <print>
 #ifdef __cpp_modules
 module;
@@ -9,12 +9,10 @@ module;
 #endif
 
 #include "tuplet/tuple.hpp"
-#include <algorithm>
 #include <charconv>
 #include <concepts>
 #include <format>
 #include <optional>
-#include <ranges>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
@@ -48,7 +46,9 @@ struct is_instantiation_of<Template, Template<Args...>> : std::true_type {};
 constexpr auto none = [] { return std::string_view(); };
 
 template <typename T, auto sname = none, auto lname = none, auto about_s = none,
-          bool pos = !sname().empty()>
+          bool pos = std::string_view(sname()).empty(),
+          bool req = !std::same_as<bool, T> &&
+                     !is_instantiation_of<std::optional, T>::value>
 struct Argument {
   using type = T;
   static_assert(std::default_initializable<T>,
@@ -66,11 +66,14 @@ struct Argument {
   constexpr static bool has_about() {
     return !std::string_view(about_s()).empty();
   }
+  // by default, arguments with no short name are assumed to be positional
   constexpr static bool positional = pos;
-  constexpr static bool required = is_instantiation_of<std::optional, T>::value;
+  // flag values are assumed not to be required, and only optional values
+  // are assumed to be optional
+  constexpr static bool required = req;
 };
 
-template <typename...> struct Parser;
+template <auto, auto, typename...> struct Parser;
 
 template <typename T> struct is_arg : std::false_type {};
 
@@ -81,14 +84,47 @@ struct is_arg<T> : std::true_type {};
 template <typename... T>
 concept Arg = (... && is_arg<T>::value);
 
-template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> args);
+template <typename T> struct is_subcommand : std::false_type {};
 
-template <typename... Args> struct Parser {
-  template <Arg A> constexpr auto arg(A) { return Parser<Args..., A>{}; }
-  constexpr auto parse(int argc, char *argv[]) const {
-    auto arguments = std::vector<std::string_view>(argv, argv + argc);
-    return _parse_tuple<Args...>(arguments);
+template <typename T>
+  requires(T::is_subcommand)
+struct is_subcommand<T> : std::true_type {};
+
+template <typename... T>
+concept Sub = (... && is_subcommand<T>::value);
+
+template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args);
+
+template <auto name = none, auto about_s = none, typename... Args>
+struct Parser {
+  template <Arg A> constexpr auto arg(A = {}) {
+    return Parser<name, about_s, Args..., A>{};
   }
+  constexpr static auto parse(std::vector<std::string_view> arguments) {
+    auto n = _parse_tuple<Args...>(arguments);
+    if (!arguments.empty())
+      throw parse_error(arguments.front(), "Unknown option");
+    if constexpr (is_subcommand) {
+      return std::optional(n);
+    } else {
+      return n;
+    }
+  }
+  constexpr static auto parse(int argc, char *argv[]) {
+    return parse(std::vector<std::string_view>(argv + 1, argv + argc));
+  }
+
+  constexpr static bool is_argument = !std::string_view(name()).empty();
+  constexpr static bool is_subcommand = is_argument;
+  constexpr static bool positional = true;
+  constexpr static bool required = false;
+  constexpr static std::string_view long_name() { return name(); }
+  constexpr static bool has_long() { return !std::string_view(name()).empty(); }
+  constexpr static std::string_view about() { return about_s(); }
+  constexpr static bool has_about() {
+    return !std::string_view(about_s()).empty();
+  }
+  using type = decltype(Parser::parse(0, nullptr));
 };
 
 template <typename T>
@@ -98,6 +134,9 @@ concept Parsable = requires(std::string_view sv) {
 
 template <typename T>
 concept Vectorish = is_instantiation_of<std::vector, T>::value;
+
+template <typename T>
+T parse_string(std::string_view sv, std::string_view option);
 
 template <typename T>
 T parse_string(std::string_view sv, std::string_view option) {
@@ -123,11 +162,14 @@ T parse_string(std::string_view sv, std::string_view option) {
     }
     return value;
   } else if constexpr (std::same_as<T, std::string>) {
-    return sv;
+    return std::string(sv);
   } else if constexpr (Parsable<T>) {
     return T::parse(sv);
+  } else if constexpr (is_instantiation_of<std::optional, T>::value) {
+    using Inner = std::decay_t<decltype(std::declval<T>().value())>;
+    return parse_string<Inner>(sv, option);
   } else {
-    static_assert(false, "Unknown parse type");
+    static_assert(std::same_as<T, void>, "Unknown parse type");
   }
 }
 
@@ -136,16 +178,25 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
   using T = Argument::type;
   T value = {};
   int p = 0;
-  for (auto a = args.begin() + 1; a < args.end(); ++a) {
+  for (auto a = args.begin(); a < args.end(); ++a) {
     auto const &arg = *a;
-    // positional parsing must always be done second
-    if constexpr (Argument::positional) {
+    if constexpr (Sub<Argument>) {
+      // subcommands swallow up all subsequent flags if the match
+      if (arg == Argument::long_name()) {
+        auto arguments = std::vector<std::string_view>(
+            std::make_move_iterator(a + 1), std::move_iterator(args.end()));
+        args.erase(a, args.end());
+        return Argument::parse(std::move(arguments));
+      }
+    } else if constexpr (Argument::positional) {
+      // positional parsing must always be done second
       if (p == pos) {
         if (arg.starts_with("-"))
           throw parse_error(Argument::long_name(),
                             std::format("Expected value, not flag {}", arg));
         value = parse_string<T>(arg, Argument::long_name());
-        goto done;
+        args.erase(a);
+        return value;
       }
     } else {
       if (Argument::has_long() && arg.starts_with("--") &&
@@ -153,15 +204,44 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
         // must be a flag, set flag to true
         if constexpr (std::same_as<T, bool>) {
           value = true;
-          goto done;
+          args.erase(a);
+          return value;
         } else {
           // not a flag, parse next string and remove them from the vector
           auto val = a + 1;
+          if (val >= args.end()) {
+            throw parse_error(Argument::long_name(),
+                              "Expected value, found none");
+          }
           if (val->starts_with("-"))
-            throw parse_error(T::long_name(),
+            throw parse_error(Argument::long_name(),
                               std::format("Expected value, not flag {}", *val));
           value = parse_string<T>(*val, Argument::long_name());
-          goto done;
+          args.erase(a, a + 2);
+          return value;
+        }
+      }
+      if (Argument::has_short() && arg.starts_with("-")) {
+        // do gnu-style flag combination parsing
+        if constexpr (std::same_as<T, bool>) {
+          if (arg.contains(Argument::short_name())) {
+            value = true;
+            args.erase(a);
+            return value;
+          }
+        } else if (arg.substr(1) == Argument::short_name()) {
+          // not a flag, parse next string and remove them from the vector
+          auto val = a + 1;
+          if (val >= args.end()) {
+            throw parse_error(Argument::long_name(),
+                              "Expected value, found none");
+          }
+          if (val->starts_with("-"))
+            throw parse_error(Argument::long_name(),
+                              std::format("Expected value, not flag {}", *val));
+          value = parse_string<T>(*val, Argument::long_name());
+          args.erase(a, a + 2);
+          return value;
         }
       }
     }
@@ -170,10 +250,10 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
   if constexpr (Argument::required)
     throw argument_not_found(Argument::has_long() ? Argument::long_name()
                                                   : Argument::short_name());
-done:
   return value;
 }
-template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> args) {
+
+template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   tuple<Args...> result = {};
   int pos = 0;
   auto eval_nonpos = [&](auto &&prev_val) {
