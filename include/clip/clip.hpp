@@ -1,3 +1,4 @@
+#include <print>
 #ifdef __cpp_modules
 module;
 #define EXPORT export
@@ -9,6 +10,7 @@ module;
 #include "tuplet/tuple.hpp"
 #include <charconv>
 #include <concepts>
+#include <expected>
 #include <format>
 #include <iterator>
 #include <optional>
@@ -80,6 +82,7 @@ template <size_t len> struct str_const {
   constexpr bool empty() const { return len == 0; }
   constexpr operator bool() const { return !empty(); }
   constexpr std::string str() const { return std::string(value, len); }
+  constexpr explicit operator std::string() const { return str(); }
   constexpr static size_t length = len;
 };
 template <size_t len>
@@ -104,7 +107,8 @@ constexpr auto none = str_const<0>();
 template <typename T, str_const sname = none, str_const lname = none,
           str_const about_s = none, bool pos = sname.empty(),
           bool req = !std::same_as<bool, T> &&
-                     !is_instantiation_of<std::optional, T>::value>
+                     !is_instantiation_of<std::optional, T>::value &&
+                     !is_instantiation_of<std::vector, T>::value>
 struct Argument {
   using type = T;
   static_assert(std::default_initializable<T>,
@@ -184,29 +188,23 @@ template <typename T>
 concept Vectorish = is_instantiation_of<std::vector, T>::value;
 
 template <typename T>
-T parse_string(std::string_view sv, std::string_view option);
-
-template <typename T, size_t size>
-T parse_string(std::string_view sv, str_const<size> option) {
+std::expected<T, std::string> parse_string(std::string_view sv) {
   if constexpr (std::same_as<T, bool>) {
     if (sv == "true")
       return true;
     if (sv == "false")
       return false;
-    throw parse_error(option.str(), "Error parsing boolean");
+    return std::unexpected("Error parsing boolean");
   } else if constexpr (std::is_arithmetic_v<T>) {
     T value;
     auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), value);
     if (ptr != sv.data() + sv.size())
-      throw parse_error(
-          option.str(),
-          std::format(
-              "Error parsing number, not all characters could be parsed: {}",
-              ptr));
+      return std::unexpected(std::format(
+          "Error parsing number, not all characters could be parsed: {}", ptr));
     if (ec != std::errc{}) {
       auto err = std::make_error_condition(ec);
-      throw parse_error(option,
-                        std::format("Error parsing number: {}", err.message()));
+      return std::unexpected(
+          std::format("Error parsing number: {}", err.message()));
     }
     return value;
   } else if constexpr (std::same_as<T, std::string>) {
@@ -215,7 +213,7 @@ T parse_string(std::string_view sv, str_const<size> option) {
     return T::parse(sv);
   } else if constexpr (is_instantiation_of<std::optional, T>::value) {
     using Inner = std::decay_t<decltype(std::declval<T>().value())>;
-    return parse_string<Inner>(sv, option);
+    return parse_string<Inner>(sv);
   } else {
     static_assert(std::same_as<T, void>, "Unknown parse type");
   }
@@ -242,18 +240,19 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
         if (arg.starts_with("-"))
           throw parse_error(Argument::long_name().str(),
                             std::format("Expected value, not flag {}", arg));
-        value = parse_string<T>(arg, Argument::long_name());
+        auto result = parse_string<T>(arg);
+        if (!result)
+          throw parse_error(Argument::long_name().str(), result.error());
         args.erase(a);
-        return value;
+        return *result;
       }
     } else {
       if (Argument::has_long() && arg.starts_with("--") &&
           arg.substr(2) == Argument::long_name()) {
         // must be a flag, set flag to true
         if constexpr (std::same_as<T, bool>) {
-          value = true;
           args.erase(a);
-          return value;
+          return true;
         } else {
           // not a flag, parse next string and remove them from the vector
           auto val = a + 1;
@@ -264,18 +263,30 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
           if (val->starts_with("-"))
             throw parse_error(Argument::long_name().str(),
                               std::format("Expected value, not flag {}", *val));
-          value = parse_string<T>(*val, Argument::long_name());
-          args.erase(a, a + 2);
-          return value;
+          if constexpr (is_instantiation_of<std::vector, T>::value) {
+            using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
+            auto result = parse_string<Inner>(*val);
+            if (!result)
+              throw parse_error(Argument::long_name().str(), result.error());
+            value.push_back(*result);
+            a = args.erase(a, a + 2) - 1;
+            continue;
+          } else {
+            auto result = parse_string<T>(*val);
+            if (!result)
+              throw parse_error(Argument::long_name().str(), result.error());
+            a = args.erase(a, a + 2);
+            return *result;
+          }
         }
       }
+
       if (Argument::has_short() && arg.starts_with("-")) {
         // do gnu-style flag combination parsing
         if constexpr (std::same_as<T, bool>) {
           if (arg.contains(Argument::short_name())) {
-            value = true;
             args.erase(a);
-            return value;
+            return true;
           }
         } else if (arg.substr(1) == Argument::short_name()) {
           // not a flag, parse next string and remove them from the vector
@@ -287,9 +298,21 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
           if (val->starts_with("-"))
             throw parse_error(Argument::long_name().str(),
                               std::format("Expected value, not flag {}", *val));
-          value = parse_string<T>(*val, Argument::long_name());
-          args.erase(a, a + 2);
-          return value;
+          if constexpr (is_instantiation_of<std::vector, T>::value) {
+            using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
+            auto result = parse_string<Inner>(*val);
+            if (!result)
+              throw parse_error(Argument::long_name().str(), result.error());
+            value.push_back(*result);
+            a = args.erase(a, a + 2) - 1;
+            continue;
+          } else {
+            auto result = parse_string<T>(*val);
+            if (!result)
+              throw parse_error(Argument::long_name().str(), result.error());
+            args.erase(a, a + 2);
+            return value;
+          }
         }
       }
     }
