@@ -1,5 +1,3 @@
-#include <iterator>
-#include <print>
 #ifdef __cpp_modules
 module;
 #define EXPORT export
@@ -12,6 +10,7 @@ module;
 #include <charconv>
 #include <concepts>
 #include <format>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
@@ -27,13 +26,13 @@ namespace clip {
 using tuplet::tuple;
 
 struct parse_error : std::runtime_error {
-  parse_error(std::string_view option, std::string what)
+  parse_error(std::string option, std::string what)
       : std::runtime_error(
             std::format("Error parsing option {}: {}", option, what)) {};
 };
 
 struct argument_not_found : std::runtime_error {
-  argument_not_found(std::string_view option)
+  argument_not_found(std::string option)
       : std::runtime_error(std::format("Argument {} not found", option)) {}
 };
 
@@ -43,10 +42,67 @@ struct is_instantiation_of : std::false_type {};
 template <template <typename...> class Template, typename... Args>
 struct is_instantiation_of<Template, Template<Args...>> : std::true_type {};
 
-constexpr auto none = [] { return std::string_view(); };
+template <size_t len> struct str_const {
+  char value[len + 1]{};
+  constexpr str_const() = default;
+  template <size_t strlen>
+  constexpr str_const(const char (&lit)[strlen]) noexcept {
+    for (size_t i = 0; i < len; ++i) {
+      value[i] = lit[i];
+    }
+  }
+  template <size_t begin, size_t end = len>
+  constexpr str_const<end - begin> substr() const noexcept
+    requires(end > begin && end <= len)
+  {
+    str_const<end - begin> result;
+    for (size_t i = 0; i != end - begin; ++i) {
+      result.value[i] = value[i + begin];
+    }
+    return result;
+  }
+  constexpr char *begin() { return value; }
+  constexpr char *data() { return value; }
+  constexpr char *end() { return value + len; }
+  constexpr bool operator==(str_const<len> s) const {
+    for (size_t i = 0; i < len; ++i) {
+      if (s[i] != value[i])
+        return false;
+    }
+    return true;
+  }
+  template <size_t s>
+    requires(s != len)
+  constexpr bool operator==(str_const<s>) const {
+    return false;
+  }
+  constexpr char operator[](size_t i) { return value[i]; };
+  constexpr bool empty() const { return len == 0; }
+  constexpr operator bool() const { return !empty(); }
+  constexpr std::string str() const { return std::string(value, len); }
+  constexpr static size_t length = len;
+};
+template <size_t len>
+constexpr bool operator==(str_const<len> lhs, std::string_view rhs) {
+  if (len != rhs.size())
+    return false;
+  for (size_t i = 0; i < len; ++i) {
+    if (lhs[i] != rhs[i])
+      return false;
+  }
+  return true;
+}
+template <size_t len>
+constexpr bool operator==(std::string_view lhs, str_const<len> rhs) {
+  return rhs == lhs;
+}
+template <size_t strlen>
+str_const(const char (&lit)[strlen]) -> str_const<strlen - 1>;
 
-template <typename T, auto sname = none, auto lname = none, auto about_s = none,
-          bool pos = std::string_view(sname()).empty(),
+constexpr auto none = str_const<0>();
+
+template <typename T, str_const sname = none, str_const lname = none,
+          str_const about_s = none, bool pos = sname.empty(),
           bool req = !std::same_as<bool, T> &&
                      !is_instantiation_of<std::optional, T>::value>
 struct Argument {
@@ -54,18 +110,12 @@ struct Argument {
   static_assert(std::default_initializable<T>,
                 "T must be default initializable");
   constexpr static bool is_argument = true;
-  constexpr static std::string_view short_name() { return sname(); }
-  constexpr static bool has_short() {
-    return !std::string_view(sname()).empty();
-  }
-  constexpr static std::string_view long_name() { return lname(); }
-  constexpr static bool has_long() {
-    return !std::string_view(lname()).empty();
-  }
-  constexpr static std::string_view about() { return about_s(); }
-  constexpr static bool has_about() {
-    return !std::string_view(about_s()).empty();
-  }
+  constexpr static auto short_name() { return sname; }
+  constexpr static bool has_short() { return sname; }
+  constexpr static auto long_name() { return lname; }
+  constexpr static bool has_long() { return lname; }
+  constexpr static auto about() { return about_s; }
+  constexpr static bool has_about() { return about_s; }
   // by default, arguments with no short name are assumed to be positional
   constexpr static bool positional = pos;
   // flag values are assumed not to be required, and only optional values
@@ -73,7 +123,7 @@ struct Argument {
   constexpr static bool required = req;
 };
 
-template <auto, auto, typename...> struct Parser;
+template <str_const, str_const, typename...> struct Parser;
 
 template <typename T> struct is_arg : std::false_type {};
 
@@ -95,7 +145,7 @@ concept Sub = (... && is_subcommand<T>::value);
 
 template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args);
 
-template <auto name = none, auto about_s = none, typename... Args>
+template <str_const name = none, str_const about_s = none, typename... Args>
 struct Parser {
   template <Arg A> constexpr auto arg(A = {}) {
     return Parser<name, about_s, Args..., A>{};
@@ -103,7 +153,7 @@ struct Parser {
   constexpr static auto parse(std::vector<std::string_view> arguments) {
     auto n = _parse_tuple<Args...>(arguments);
     if (!arguments.empty())
-      throw parse_error(arguments.front(), "Unknown option");
+      throw parse_error(std::string(arguments.front()), "Unknown option");
     if constexpr (is_subcommand) {
       return std::optional(n);
     } else {
@@ -114,16 +164,14 @@ struct Parser {
     return parse(std::vector<std::string_view>(argv + 1, argv + argc));
   }
 
-  constexpr static bool is_argument = !std::string_view(name()).empty();
+  constexpr static bool is_argument = name;
   constexpr static bool is_subcommand = is_argument;
   constexpr static bool positional = true;
   constexpr static bool required = false;
-  constexpr static std::string_view long_name() { return name(); }
-  constexpr static bool has_long() { return !std::string_view(name()).empty(); }
-  constexpr static std::string_view about() { return about_s(); }
-  constexpr static bool has_about() {
-    return !std::string_view(about_s()).empty();
-  }
+  constexpr static auto long_name() { return name; }
+  constexpr static bool has_long() { return name; }
+  constexpr static auto about() { return about_s; }
+  constexpr static bool has_about() { return about_s; }
   using type = decltype(Parser::parse(0, nullptr));
 };
 
@@ -138,20 +186,20 @@ concept Vectorish = is_instantiation_of<std::vector, T>::value;
 template <typename T>
 T parse_string(std::string_view sv, std::string_view option);
 
-template <typename T>
-T parse_string(std::string_view sv, std::string_view option) {
+template <typename T, size_t size>
+T parse_string(std::string_view sv, str_const<size> option) {
   if constexpr (std::same_as<T, bool>) {
     if (sv == "true")
       return true;
     if (sv == "false")
       return false;
-    throw parse_error(option, "Error parsing boolean");
+    throw parse_error(option.str(), "Error parsing boolean");
   } else if constexpr (std::is_arithmetic_v<T>) {
     T value;
     auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), value);
     if (ptr != sv.data() + sv.size())
       throw parse_error(
-          option,
+          option.str(),
           std::format(
               "Error parsing number, not all characters could be parsed: {}",
               ptr));
@@ -192,7 +240,7 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
       // positional parsing must always be done second
       if (p == pos) {
         if (arg.starts_with("-"))
-          throw parse_error(Argument::long_name(),
+          throw parse_error(Argument::long_name().str(),
                             std::format("Expected value, not flag {}", arg));
         value = parse_string<T>(arg, Argument::long_name());
         args.erase(a);
@@ -210,11 +258,11 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
           // not a flag, parse next string and remove them from the vector
           auto val = a + 1;
           if (val >= args.end()) {
-            throw parse_error(Argument::long_name(),
+            throw parse_error(Argument::long_name().str(),
                               "Expected value, found none");
           }
           if (val->starts_with("-"))
-            throw parse_error(Argument::long_name(),
+            throw parse_error(Argument::long_name().str(),
                               std::format("Expected value, not flag {}", *val));
           value = parse_string<T>(*val, Argument::long_name());
           args.erase(a, a + 2);
@@ -233,11 +281,11 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
           // not a flag, parse next string and remove them from the vector
           auto val = a + 1;
           if (val >= args.end()) {
-            throw parse_error(Argument::long_name(),
+            throw parse_error(Argument::long_name().str(),
                               "Expected value, found none");
           }
           if (val->starts_with("-"))
-            throw parse_error(Argument::long_name(),
+            throw parse_error(Argument::long_name().str(),
                               std::format("Expected value, not flag {}", *val));
           value = parse_string<T>(*val, Argument::long_name());
           args.erase(a, a + 2);
@@ -248,8 +296,9 @@ auto _parse(std::vector<std::string_view> &args, int pos) {
     ++p;
   }
   if constexpr (Argument::required)
-    throw argument_not_found(Argument::has_long() ? Argument::long_name()
-                                                  : Argument::short_name());
+    throw argument_not_found(Argument::has_long()
+                                 ? Argument::long_name().str()
+                                 : Argument::short_name().str());
   return value;
 }
 

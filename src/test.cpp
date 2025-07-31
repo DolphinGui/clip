@@ -7,17 +7,14 @@ using clip::Argument;
 using clip::none;
 using clip::Parser;
 
-constexpr auto subcommand =
-    Parser<[] { return "search"; }, [] { return "runs search functions"; }>{}
-        .arg(Argument<std::string, none, [] { return "FILE"; },
-                      [] { return "File that is searched"; }>{});
+constexpr auto subcommand = Parser<"search", "runs search functions">{}.arg(
+    Argument<std::string, none, "FILE", "file to be searched">{});
 
 constexpr auto parser =
     Parser<>{}
-        .arg(Argument<bool, none, [] { return "verbose"; },
-                      [] { return "controls verbosity"; }, false>{})
-        .arg(Argument<std::optional<std::string>, [] { return "o"; },
-                      [] { return "output"; }, [] { return "output file"; }>{})
+        .arg(Argument<bool, none, "verbose", "increases verbosity", false>{})
+        .arg(Argument<std::optional<std::string>, "o", "output",
+                      "output file">{})
         .arg(subcommand);
 
 int main(int argc, char **argv) {
