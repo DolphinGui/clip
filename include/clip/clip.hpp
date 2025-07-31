@@ -1,4 +1,5 @@
 #include <print>
+#include <variant>
 #ifdef __cpp_modules
 module;
 #define EXPORT export
@@ -17,6 +18,7 @@ module;
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 #ifdef __cpp_modules
@@ -103,9 +105,10 @@ template <size_t strlen>
 str_const(const char (&lit)[strlen]) -> str_const<strlen - 1>;
 
 constexpr auto none = str_const<0>();
-
-template <typename T, str_const sname = none, str_const lname = none,
-          str_const about_s = none, bool pos = sname.empty(),
+constexpr bool positional = true;
+constexpr bool flag = false;
+template <typename T, bool pos = false, str_const sname = none,
+          str_const lname = none, str_const about_s = none,
           bool req = !std::same_as<bool, T> &&
                      !is_instantiation_of<std::optional, T>::value &&
                      !is_instantiation_of<std::vector, T>::value>
@@ -180,12 +183,19 @@ struct Parser {
 };
 
 template <typename T>
-concept Parsable = requires(std::string_view sv) {
+concept UserParsable = requires(std::string_view sv) {
   { T::parse(sv) } -> std::convertible_to<T>;
 };
-
 template <typename T>
-concept Vectorish = is_instantiation_of<std::vector, T>::value;
+concept Parsable = std::same_as<T, bool> || std::is_arithmetic_v<T> ||
+                   std::same_as<T, std::string> || UserParsable<T> ||
+                   is_instantiation_of<std::optional, T>::value ||
+                   is_instantiation_of<std::vector, T>::value ||
+                   is_instantiation_of<std::variant, T>::value;
+
+template <typename T, typename... Ts>
+std::expected<std::variant<T, Ts...>, std::string>
+_parse_variant(std::string_view sv);
 
 template <typename T>
 std::expected<T, std::string> parse_string(std::string_view sv) {
@@ -209,13 +219,37 @@ std::expected<T, std::string> parse_string(std::string_view sv) {
     return value;
   } else if constexpr (std::same_as<T, std::string>) {
     return std::string(sv);
-  } else if constexpr (Parsable<T>) {
+  } else if constexpr (UserParsable<T>) {
     return T::parse(sv);
   } else if constexpr (is_instantiation_of<std::optional, T>::value) {
     using Inner = std::decay_t<decltype(std::declval<T>().value())>;
     return parse_string<Inner>(sv);
+  } else if constexpr (is_instantiation_of<std::variant, T>::value) {
+    static_assert(std::variant_size_v<T> > 0, "Cannot parse empty variant");
+    return [&]<typename... Ts>(std::variant<Ts...>) {
+      return _parse_variant<Ts...>(sv);
+    }(T{});
   } else {
     static_assert(std::same_as<T, void>, "Unknown parse type");
+  }
+}
+
+template <typename T, typename... Ts>
+std::expected<std::variant<T, Ts...>, std::string>
+_parse_variant(std::string_view sv) {
+  auto result = parse_string<T>(sv);
+  if (result) {
+    return std::variant<T, Ts...>(std::move(*result));
+  }
+  if constexpr (sizeof...(Ts) == 0) {
+    return std::unexpected<std::string>("Could not parse any variant types");
+  } else {
+    auto var = _parse_variant<Ts...>(sv);
+    if (!var)
+      return std::unexpected<std::string>(std::move(var.error()));
+    else
+      return std::visit(
+          [](auto &&v) { return std::variant<T, Ts...>(std::move(v)); }, *var);
   }
 }
 
