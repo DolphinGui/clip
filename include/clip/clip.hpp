@@ -1,5 +1,3 @@
-#include <print>
-#include <variant>
 #ifdef __cpp_modules
 module;
 #define EXPORT export
@@ -15,9 +13,11 @@ module;
 #include <format>
 #include <iterator>
 #include <optional>
+#include <print>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -47,7 +47,7 @@ template <template <typename...> class Template, typename... Args>
 struct is_instantiation_of<Template, Template<Args...>> : std::true_type {};
 
 template <size_t len> struct str_const {
-  char value[len + 1]{};
+  char value[len + 1]{}; // literally just to avoid 0-len arrays
   constexpr str_const() = default;
   template <size_t strlen>
   constexpr str_const(const char (&lit)[strlen]) noexcept {
@@ -84,7 +84,14 @@ template <size_t len> struct str_const {
   constexpr bool empty() const { return len == 0; }
   constexpr operator bool() const { return !empty(); }
   constexpr std::string str() const { return std::string(value, len); }
+  constexpr std::string_view view() const {
+    if constexpr (len == 0)
+      return std::string_view();
+    else
+      return std::string_view(value, len);
+  }
   constexpr explicit operator std::string() const { return str(); }
+  constexpr explicit operator std::string_view() const { return view(); }
   constexpr static size_t length = len;
 };
 template <size_t len>
@@ -103,6 +110,10 @@ constexpr bool operator==(std::string_view lhs, str_const<len> rhs) {
 }
 template <size_t strlen>
 str_const(const char (&lit)[strlen]) -> str_const<strlen - 1>;
+
+struct FormatOptions {
+  size_t cols = 0, indent = 0;
+};
 
 constexpr auto none = str_const<0>();
 constexpr bool positional = true;
@@ -123,6 +134,8 @@ struct Argument {
   constexpr static bool has_long() { return lname; }
   constexpr static auto about() { return about_s; }
   constexpr static bool has_about() { return about_s; }
+  static_assert(has_short() || has_long(),
+                "unnnamed arguments are not allowed");
   // by default, arguments with no short name are assumed to be positional
   constexpr static bool positional = pos;
   // flag values are assumed not to be required, and only optional values
@@ -130,7 +143,7 @@ struct Argument {
   constexpr static bool required = req;
 };
 
-template <str_const, str_const, typename...> struct Parser;
+template <str_const, str_const, str_const, typename...> struct Parser;
 
 template <typename T> struct is_arg : std::false_type {};
 
@@ -140,6 +153,15 @@ struct is_arg<T> : std::true_type {};
 
 template <typename... T>
 concept Arg = (... && is_arg<T>::value);
+
+template <typename T> struct is_positional : std::false_type {};
+
+template <typename T>
+  requires(T::is_positional)
+struct is_positional<T> : std::false_type {};
+
+template <typename... T>
+concept Positional = (... && is_positional<T>::value);
 
 template <typename T> struct is_subcommand : std::false_type {};
 
@@ -152,10 +174,11 @@ concept Sub = (... && is_subcommand<T>::value);
 
 template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args);
 
-template <str_const name = none, str_const about_s = none, typename... Args>
+template <str_const shorthand = none, str_const name = none,
+          str_const about_s = none, typename... Args>
 struct Parser {
   template <Arg A> constexpr auto arg(A = {}) {
-    return Parser<name, about_s, Args..., A>{};
+    return Parser<shorthand, name, about_s, Args..., A>{};
   }
   constexpr static auto parse(std::vector<std::string_view> arguments) {
     auto n = _parse_tuple<Args...>(arguments);
@@ -171,12 +194,17 @@ struct Parser {
     return parse(std::vector<std::string_view>(argv + 1, argv + argc));
   }
 
+  constexpr static std::string help();
+  constexpr static void output_help(auto it, size_t indentation);
+
   constexpr static bool is_argument = name;
   constexpr static bool is_subcommand = is_argument;
   constexpr static bool positional = true;
   constexpr static bool required = false;
   constexpr static auto long_name() { return name; }
   constexpr static bool has_long() { return name; }
+  constexpr static auto short_name() { return shorthand; }
+  constexpr static bool has_short() { return shorthand; }
   constexpr static auto about() { return about_s; }
   constexpr static bool has_about() { return about_s; }
   using type = decltype(Parser::parse(0, nullptr));
@@ -186,12 +214,19 @@ template <typename T>
 concept UserParsable = requires(std::string_view sv) {
   { T::parse(sv) } -> std::convertible_to<T>;
 };
+
 template <typename T>
 concept Parsable = std::same_as<T, bool> || std::is_arithmetic_v<T> ||
                    std::same_as<T, std::string> || UserParsable<T> ||
                    is_instantiation_of<std::optional, T>::value ||
                    is_instantiation_of<std::vector, T>::value ||
                    is_instantiation_of<std::variant, T>::value;
+
+template <typename T>
+concept UserHelpable =
+    requires(std::back_insert_iterator<std::string> out, size_t indent) {
+      { T::output_help(out, indent) } -> std::same_as<void>;
+    };
 
 template <typename T, typename... Ts>
 std::expected<std::variant<T, Ts...>, std::string>
@@ -254,133 +289,262 @@ _parse_variant(std::string_view sv) {
 }
 
 template <Arg Argument>
-auto _parse(std::vector<std::string_view> &args, int pos) {
+auto _parse(std::vector<std::string_view> &args, size_t pos) {
   using T = Argument::type;
+  bool has_parsed = false;
   T value = {};
-  int p = 0;
-  for (auto a = args.begin(); a < args.end(); ++a) {
-    auto const &arg = *a;
-    if constexpr (Sub<Argument>) {
-      // subcommands swallow up all subsequent flags if the match
-      if (arg == Argument::long_name()) {
-        auto arguments = std::vector<std::string_view>(
-            std::make_move_iterator(a + 1), std::move_iterator(args.end()));
-        args.erase(a, args.end());
-        return Argument::parse(std::move(arguments));
-      }
-    } else if constexpr (Argument::positional) {
-      // positional parsing must always be done second
-      if (p == pos) {
-        if (arg.starts_with("-"))
-          throw parse_error(Argument::long_name().str(),
-                            std::format("Expected value, not flag {}", arg));
-        auto result = parse_string<T>(arg);
-        if (!result)
-          throw parse_error(Argument::long_name().str(), result.error());
-        args.erase(a);
-        return *result;
-      }
-    } else {
-      if (Argument::has_long() && arg.starts_with("--") &&
-          arg.substr(2) == Argument::long_name()) {
-        // must be a flag, set flag to true
-        if constexpr (std::same_as<T, bool>) {
-          args.erase(a);
-          return true;
-        } else {
-          // not a flag, parse next string and remove them from the vector
-          auto val = a + 1;
-          if (val >= args.end()) {
-            throw parse_error(Argument::long_name().str(),
-                              "Expected value, found none");
-          }
-          if (val->starts_with("-"))
-            throw parse_error(Argument::long_name().str(),
-                              std::format("Expected value, not flag {}", *val));
-          if constexpr (is_instantiation_of<std::vector, T>::value) {
-            using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
-            auto result = parse_string<Inner>(*val);
-            if (!result)
-              throw parse_error(Argument::long_name().str(), result.error());
-            value.push_back(*result);
-            a = args.erase(a, a + 2) - 1;
+  if constexpr (Argument::positional && !Sub<Argument>) {
+    // positional parsing must always be done second
+    auto a = args.begin() + pos;
+    auto &arg = *a;
+    if (arg.starts_with("-"))
+      throw parse_error(Argument::long_name().str(),
+                        std::format("Expected value, not flag {}", arg));
+    auto result = parse_string<T>(arg);
+    if (!result)
+      throw parse_error(Argument::long_name().str(), result.error());
+    args.erase(a);
+    return *result;
+  } else
+    for (auto a = args.begin(); a < args.end(); ++a) {
+      auto const &arg = *a;
+      if constexpr (Sub<Argument>) {
+        // subcommands swallow up all subsequent flags if the match
+        if ((Argument::has_long() && Argument::long_name() == arg) ||
+            (Argument::has_short() && Argument::short_name() == arg)) {
+          auto arguments = std::vector<std::string_view>(
+              std::make_move_iterator(a + 1), std::move_iterator(args.end()));
+          args.erase(a, args.end());
+          return Argument::parse(std::move(arguments));
+        }
+      } else {
+        if (Argument::has_long() && arg.starts_with("--") &&
+            arg.substr(2) == Argument::long_name()) {
+          // must be a flag, set flag to true
+          if constexpr (std::same_as<T, bool>) {
+            a = args.erase(a) - 1;
+            value = true;
+            has_parsed = true;
             continue;
           } else {
-            auto result = parse_string<T>(*val);
-            if (!result)
-              throw parse_error(Argument::long_name().str(), result.error());
-            a = args.erase(a, a + 2);
-            return *result;
+            // not a flag, parse next string and remove them from the vector
+            auto val = a + 1;
+            if (val >= args.end()) {
+              throw parse_error(Argument::long_name().str(),
+                                "Expected value, found none");
+            }
+            if (val->starts_with("-"))
+              throw parse_error(
+                  Argument::long_name().str(),
+                  std::format("Expected value, not flag {}", *val));
+            if constexpr (is_instantiation_of<std::vector, T>::value) {
+              using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
+              auto result = parse_string<Inner>(*val);
+              if (!result)
+                throw parse_error(Argument::long_name().str(), result.error());
+              value.push_back(*result);
+              a = args.erase(a, a + 2) - 1;
+              has_parsed = true;
+              continue;
+            } else {
+              auto result = parse_string<T>(*val);
+              if (!result)
+                throw parse_error(Argument::long_name().str(), result.error());
+              a = args.erase(a, a + 2) - 1;
+              value = *result;
+              has_parsed = true;
+              continue;
+            }
           }
         }
-      }
 
-      if (Argument::has_short() && arg.starts_with("-")) {
-        // do gnu-style flag combination parsing
-        if constexpr (std::same_as<T, bool>) {
-          if (arg.contains(Argument::short_name())) {
-            args.erase(a);
-            return true;
-          }
-        } else if (arg.substr(1) == Argument::short_name()) {
-          // not a flag, parse next string and remove them from the vector
-          auto val = a + 1;
-          if (val >= args.end()) {
-            throw parse_error(Argument::long_name().str(),
-                              "Expected value, found none");
-          }
-          if (val->starts_with("-"))
-            throw parse_error(Argument::long_name().str(),
-                              std::format("Expected value, not flag {}", *val));
-          if constexpr (is_instantiation_of<std::vector, T>::value) {
-            using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
-            auto result = parse_string<Inner>(*val);
-            if (!result)
-              throw parse_error(Argument::long_name().str(), result.error());
-            value.push_back(*result);
-            a = args.erase(a, a + 2) - 1;
-            continue;
-          } else {
-            auto result = parse_string<T>(*val);
-            if (!result)
-              throw parse_error(Argument::long_name().str(), result.error());
-            args.erase(a, a + 2);
-            return value;
+        if (Argument::has_short() && arg.starts_with("-")) {
+          // do gnu-style flag combination parsing
+          if constexpr (std::same_as<T, bool>) {
+            if (arg.contains(Argument::short_name())) {
+              a = args.erase(a) - 1;
+              value = true;
+              has_parsed = true;
+              continue;
+            }
+          } else if (arg.substr(1) == Argument::short_name()) {
+            // not a flag, parse next string and remove them from the vector
+            auto val = a + 1;
+            if (val >= args.end()) {
+              throw parse_error(Argument::long_name().str(),
+                                "Expected value, found none");
+            }
+            if (val->starts_with("-"))
+              throw parse_error(
+                  Argument::long_name().str(),
+                  std::format("Expected value, not flag {}", *val));
+            if constexpr (is_instantiation_of<std::vector, T>::value) {
+              using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
+              auto result = parse_string<Inner>(*val);
+              if (!result)
+                throw parse_error(Argument::long_name().str(), result.error());
+              value.push_back(*result);
+              a = args.erase(a, a + 2) - 1;
+              has_parsed = true;
+              continue;
+            } else {
+              auto result = parse_string<T>(*val);
+              if (!result)
+                throw parse_error(Argument::long_name().str(), result.error());
+              a = args.erase(a, a + 2) - 1;
+              value = *result;
+              has_parsed = true;
+              continue;
+            }
           }
         }
       }
     }
-    ++p;
-  }
-  if constexpr (Argument::required)
+  if (Argument::required && !has_parsed)
     throw argument_not_found(Argument::has_long()
                                  ? Argument::long_name().str()
                                  : Argument::short_name().str());
   return value;
 }
 
+template <typename... Ts> auto _apply_tuple(tuple<Ts...> t, auto &&f) {
+  using Sequence = std::make_index_sequence<sizeof...(Ts)>;
+  auto impl = [&]<size_t... is>(std::index_sequence<is...>) {
+    return tuple(f(tuplet::get<is>(t))...);
+  };
+  return impl(Sequence{});
+}
+
 template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   tuple<Args...> result = {};
-  int pos = 0;
-  auto eval_nonpos = [&](auto &&prev_val) {
+  auto eval_subcommand = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
-    if constexpr (!Argument::positional) {
+    if constexpr (Sub<Argument>) {
       return _parse<Argument>(args, 0);
     } else {
       return prev_val;
     }
   };
+  auto eval_nonpos = [&](auto &&prev_val) {
+    using Argument = std::decay_t<decltype(prev_val)>;
+    if constexpr (Arg<Argument> && !Positional<Argument>) {
+      return _parse<Argument>(args, 0);
+    } else {
+      return prev_val;
+    }
+  };
+  int pos = 0;
   auto eval_pos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (!Arg<Argument>) {
       return prev_val;
     } else {
-      ++pos;
-      return _parse<Argument>(args, pos - 1);
+      return _parse<Argument>(args, pos++);
     }
   };
 
-  return result.map(eval_nonpos).map(eval_pos);
+  return result.map(eval_subcommand).map(eval_nonpos).map(eval_pos);
+}
+
+template <typename T> constexpr std::string_view out_type();
+
+template <typename T>
+  requires(std::is_arithmetic_v<T>)
+constexpr std::string_view out_type() {
+  return "<NUM>";
+}
+
+template <typename T>
+  requires(std::is_convertible_v<T, std::string>)
+constexpr std::string_view out_type() {
+  return "<STR>";
+}
+
+template <typename T>
+  requires(is_instantiation_of<std::optional, T>::value)
+constexpr std::string_view out_type() {
+  using Inner = std::decay_t<decltype(std::declval<T>().value())>;
+  return out_type<Inner>();
+}
+
+template <typename T>
+  requires(is_instantiation_of<std::vector, T>::value)
+constexpr std::string_view out_type() {
+  using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
+  return out_type<Inner>();
+}
+
+// this is done to try to reduce binary bloat
+// todo virtualize everything else to reduce binary
+// bloat
+void _generate_options_help(auto output_it, FormatOptions f,
+                            std::string_view sh = {}, std::string_view l = {},
+                            std::string_view about = {}) {
+  size_t position = 0;
+  auto pad = [&](size_t length) {
+    for (size_t _ = 0; _ < length; ++_) {
+      *output_it++ = ' ';
+    }
+    position += length;
+  };
+  auto out = [&]<size_t l>(std::string_view s) {
+    output_it = std::copy(s.begin(), s.end(), output_it);
+    position += l;
+  };
+  auto newline = [&] {
+    *output_it++ = '\n';
+    position = 0;
+    pad(f.indent);
+  };
+
+  pad(f.indent);
+  if (!sh.empty()) {
+    out("-");
+    out(sh);
+  }
+  if (!l.empty()) {
+    if (!sh.empty()) {
+      out(", ");
+    }
+    out("--");
+    out(l);
+  }
+  // currently the about output algorithm doesn't really respect whitespace
+  // in the about code
+  if (!about.empty()) {
+    size_t row_length = f.cols - position;
+    size_t rows = about.size() / row_length + 1;
+    // this is a herustic to increase horizontal space if
+    // too many rows would be required
+    if (rows > 2) {
+      // todo check under windows if \r is necessary or not
+      f.indent += 2;
+      newline();
+    } else {
+      f.indent = position;
+    }
+    auto it = about.begin();
+    while (it < about.end()) {
+      // ignore leading whitespace
+      while (std::isspace(*it))
+        ++it;
+      // find end of next word
+      auto word_end = it;
+      while (!std::isspace(*word_end))
+        ++word_end;
+      // word would not fit on screen
+      if (std::distance(it, word_end) + position > f.cols) {
+        newline();
+      }
+      out(std::string_view(it, word_end));
+    }
+  }
+}
+
+template <Arg A, Arg... As>
+void _gen_option_help(auto output_it, FormatOptions o) {
+  auto shortname = A::short_name().view(), longname = A::long_name().view(),
+       about = A::about().view();
 }
 
 } // namespace clip
