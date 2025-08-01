@@ -143,6 +143,13 @@ struct Argument {
   constexpr static bool required = req;
 };
 
+struct _vArgument {
+  std::string_view shortname;
+  std::string_view longname;
+  std::string_view about;
+  bool positional, required;
+};
+
 template <str_const, str_const, str_const, typename...> struct Parser;
 
 template <typename T> struct is_arg : std::false_type {};
@@ -326,35 +333,6 @@ auto _parse(std::vector<std::string_view> &args, size_t pos) {
             value = true;
             has_parsed = true;
             continue;
-          } else {
-            // not a flag, parse next string and remove them from the vector
-            auto val = a + 1;
-            if (val >= args.end()) {
-              throw parse_error(Argument::long_name().str(),
-                                "Expected value, found none");
-            }
-            if (val->starts_with("-"))
-              throw parse_error(
-                  Argument::long_name().str(),
-                  std::format("Expected value, not flag {}", *val));
-            if constexpr (is_instantiation_of<std::vector, T>::value) {
-              using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
-              auto result = parse_string<Inner>(*val);
-              if (!result)
-                throw parse_error(Argument::long_name().str(), result.error());
-              value.push_back(*result);
-              a = args.erase(a, a + 2) - 1;
-              has_parsed = true;
-              continue;
-            } else {
-              auto result = parse_string<T>(*val);
-              if (!result)
-                throw parse_error(Argument::long_name().str(), result.error());
-              a = args.erase(a, a + 2) - 1;
-              value = *result;
-              has_parsed = true;
-              continue;
-            }
           }
         }
 
@@ -367,35 +345,37 @@ auto _parse(std::vector<std::string_view> &args, size_t pos) {
               has_parsed = true;
               continue;
             }
-          } else if (arg.substr(1) == Argument::short_name()) {
-            // not a flag, parse next string and remove them from the vector
-            auto val = a + 1;
-            if (val >= args.end()) {
-              throw parse_error(Argument::long_name().str(),
-                                "Expected value, found none");
-            }
-            if (val->starts_with("-"))
-              throw parse_error(
-                  Argument::long_name().str(),
-                  std::format("Expected value, not flag {}", *val));
-            if constexpr (is_instantiation_of<std::vector, T>::value) {
-              using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
-              auto result = parse_string<Inner>(*val);
-              if (!result)
-                throw parse_error(Argument::long_name().str(), result.error());
-              value.push_back(*result);
-              a = args.erase(a, a + 2) - 1;
-              has_parsed = true;
-              continue;
-            } else {
-              auto result = parse_string<T>(*val);
-              if (!result)
-                throw parse_error(Argument::long_name().str(), result.error());
-              a = args.erase(a, a + 2) - 1;
-              value = *result;
-              has_parsed = true;
-              continue;
-            }
+          }
+        }
+        if ((Argument::has_short() &&
+             arg.substr(1) == Argument::short_name()) ||
+            (Argument::has_long() && arg.substr(2) == Argument::long_name())) {
+          // not a flag, parse next string and remove them from the vector
+          auto val = a + 1;
+          if (val >= args.end()) {
+            throw parse_error(Argument::long_name().str(),
+                              "Expected value, found none");
+          }
+          if (val->starts_with("-"))
+            throw parse_error(Argument::long_name().str(),
+                              std::format("Expected value, not flag {}", *val));
+          if constexpr (is_instantiation_of<std::vector, T>::value) {
+            using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
+            auto result = parse_string<Inner>(*val);
+            if (!result)
+              throw parse_error(Argument::long_name().str(), result.error());
+            value.push_back(*result);
+            a = args.erase(a, a + 2) - 1;
+            has_parsed = true;
+            continue;
+          } else {
+            auto result = parse_string<T>(*val);
+            if (!result)
+              throw parse_error(Argument::long_name().str(), result.error());
+            a = args.erase(a, a + 2) - 1;
+            value = *result;
+            has_parsed = true;
+            continue;
           }
         }
       }
@@ -545,6 +525,9 @@ template <Arg A, Arg... As>
 void _gen_option_help(auto output_it, FormatOptions o) {
   auto shortname = A::short_name().view(), longname = A::long_name().view(),
        about = A::about().view();
+  _generate_options_help(output_it, o, shortname, longname, about);
+  *output_it++ = '\n';
+  _gen_option_help<As...>(output_it, o);
 }
 
 } // namespace clip
