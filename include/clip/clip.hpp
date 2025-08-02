@@ -115,6 +115,8 @@ struct FormatOptions {
   size_t cols = 0, indent = 0;
 };
 
+struct _vArgument;
+
 constexpr auto none = str_const<0>();
 constexpr bool positional = true;
 constexpr bool flag = false;
@@ -136,21 +138,24 @@ struct Argument {
   constexpr static bool has_about() { return about_s; }
   static_assert(has_short() || has_long(),
                 "unnnamed arguments are not allowed");
-  // by default, arguments with no short name are assumed to be positional
   constexpr static bool positional = pos;
   // flag values are assumed not to be required, and only optional values
   // are assumed to be optional
   constexpr static bool required = req;
+  constexpr static _vArgument virtualize();
 };
-
+// The callback should _know_ the return type, and can just
+// write through a void*
+using ParseCallback = void (*)(void *, std::string_view);
+enum struct Type { Flag, Positional, Subcommand };
 struct _vArgument {
-  std::string_view shortname;
-  std::string_view longname;
-  std::string_view about;
-  bool positional, required;
+  std::string shortname = {};
+  std::string longname = {};
+  std::string about = {};
+  std::string param = {};
+  ParseCallback parser = {};
+  Type t;
 };
-
-template <str_const, str_const, str_const, typename...> struct Parser;
 
 template <typename T> struct is_arg : std::false_type {};
 
@@ -165,7 +170,7 @@ template <typename T> struct is_positional : std::false_type {};
 
 template <typename T>
   requires(T::is_positional)
-struct is_positional<T> : std::false_type {};
+struct is_positional<T> : std::true_type {};
 
 template <typename... T>
 concept Positional = (... && is_positional<T>::value);
@@ -179,13 +184,28 @@ struct is_subcommand<T> : std::true_type {};
 template <typename... T>
 concept Sub = (... && is_subcommand<T>::value);
 
+template <typename T> constexpr std::string out_type();
+
+template <typename T, bool pos, str_const sname, str_const lname,
+          str_const about_s, bool req>
+constexpr _vArgument
+Argument<T, pos, sname, lname, about_s, req>::virtualize() {
+  return {short_name().str(),
+          long_name().str(),
+          about().str(),
+          out_type<T>(),
+          {},
+          pos ? Type::Positional : Type::Flag};
+}
+
 template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args);
 
-template <str_const shorthand = none, str_const name = none,
-          str_const about_s = none, typename... Args>
+template <str_const shorthand = none, str_const name = "COMMAND",
+          str_const about_s = "Describe command here", bool is_sub = false,
+          typename... Args>
 struct Parser {
   template <Arg A> constexpr auto arg(A = {}) {
-    return Parser<shorthand, name, about_s, Args..., A>{};
+    return Parser<shorthand, name, about_s, is_subcommand, Args..., A>{};
   }
   constexpr static auto parse(std::vector<std::string_view> arguments) {
     auto n = _parse_tuple<Args...>(arguments);
@@ -202,11 +222,12 @@ struct Parser {
   }
 
   constexpr static std::string help();
-  constexpr static void output_help(auto it, size_t indentation);
+  constexpr static void output_help(std::output_iterator<char const &> auto it,
+                                    FormatOptions o);
 
-  constexpr static bool is_argument = name;
-  constexpr static bool is_subcommand = is_argument;
-  constexpr static bool positional = true;
+  constexpr static bool is_argument = is_sub;
+  constexpr static bool is_subcommand = is_sub;
+  constexpr static bool positional = false;
   constexpr static bool required = false;
   constexpr static auto long_name() { return name; }
   constexpr static bool has_long() { return name; }
@@ -215,6 +236,12 @@ struct Parser {
   constexpr static auto about() { return about_s; }
   constexpr static bool has_about() { return about_s; }
   using type = decltype(Parser::parse(0, nullptr));
+
+  constexpr static _vArgument virtualize() {
+    return {
+        shorthand.str(), name.str(), about_s.str(), "", {}, Type::Subcommand,
+    };
+  }
 };
 
 template <typename T>
@@ -387,14 +414,6 @@ auto _parse(std::vector<std::string_view> &args, size_t pos) {
   return value;
 }
 
-template <typename... Ts> auto _apply_tuple(tuple<Ts...> t, auto &&f) {
-  using Sequence = std::make_index_sequence<sizeof...(Ts)>;
-  auto impl = [&]<size_t... is>(std::index_sequence<is...>) {
-    return tuple(f(tuplet::get<is>(t))...);
-  };
-  return impl(Sequence{});
-}
-
 template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   tuple<Args...> result = {};
   auto eval_subcommand = [&](auto &&prev_val) {
@@ -426,50 +445,53 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   return result.map(eval_subcommand).map(eval_nonpos).map(eval_pos);
 }
 
-template <typename T> constexpr std::string_view out_type();
+template <typename T> constexpr std::string user_out_type() = delete;
 
-template <typename T>
-  requires(std::is_arithmetic_v<T>)
-constexpr std::string_view out_type() {
-  return "<NUM>";
+template <typename T, typename... Ts>
+constexpr std::string _variant_out_type(std::variant<T, Ts...>) {
+  if constexpr (sizeof...(Ts) == 0) {
+    return out_type<T>();
+  } else {
+    return out_type<T>() + "|" +
+           _variant_out_type<Ts...>(std::variant<Ts...>{});
+  }
 }
 
-template <typename T>
-  requires(std::is_convertible_v<T, std::string>)
-constexpr std::string_view out_type() {
-  return "<STR>";
-}
-
-template <typename T>
-  requires(is_instantiation_of<std::optional, T>::value)
-constexpr std::string_view out_type() {
-  using Inner = std::decay_t<decltype(std::declval<T>().value())>;
-  return out_type<Inner>();
-}
-
-template <typename T>
-  requires(is_instantiation_of<std::vector, T>::value)
-constexpr std::string_view out_type() {
-  using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
-  return out_type<Inner>();
+template <typename T> constexpr std::string out_type() {
+  if constexpr (std::same_as<T, bool>) {
+    return "";
+  }
+  if constexpr (std::is_arithmetic_v<T>)
+    return "NUM";
+  else if constexpr (std::is_convertible_v<T, std::string>) {
+    return "STR";
+  } else if constexpr (is_instantiation_of<std::optional, T>::value) {
+    using Inner = std::decay_t<decltype(std::declval<T>().value())>;
+    return out_type<Inner>() + "?";
+  } else if constexpr (is_instantiation_of<std::vector, T>::value) {
+    using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
+    return out_type<Inner>();
+  } else if constexpr (is_instantiation_of<std::variant, T>::value) {
+    return _variant_out_type(T{});
+  } else {
+    return user_out_type<T>();
+  }
 }
 
 // this is done to try to reduce binary bloat
 // todo virtualize everything else to reduce binary
 // bloat
 void _generate_options_help(auto output_it, FormatOptions f,
-                            std::string_view sh = {}, std::string_view l = {},
-                            std::string_view about = {}) {
+                            _vArgument const &arg) {
+  auto &[sh, l, about, param, _parse, _t] = arg;
   size_t position = 0;
   auto pad = [&](size_t length) {
-    for (size_t _ = 0; _ < length; ++_) {
-      *output_it++ = ' ';
-    }
+    output_it = std::fill_n(output_it, length, ' ');
     position += length;
   };
-  auto out = [&]<size_t l>(std::string_view s) {
+  auto out = [&](std::string_view s) {
     output_it = std::copy(s.begin(), s.end(), output_it);
-    position += l;
+    position += s.size();
   };
   auto newline = [&] {
     *output_it++ = '\n';
@@ -479,26 +501,31 @@ void _generate_options_help(auto output_it, FormatOptions f,
 
   pad(f.indent);
   if (!sh.empty()) {
-    out("-");
-    out(sh);
+    std::format_to(output_it, "-{}", sh);
+  } else {
+    pad(2);
   }
   if (!l.empty()) {
-    if (!sh.empty()) {
-      out(", ");
-    }
-    out("--");
-    out(l);
+    if (sh.empty())
+      std::format_to(output_it, "  --{:6} ", l);
+    else
+      std::format_to(output_it, ", --{:6} ", l);
+  } else {
+    pad(10);
   }
+  std::format_to(output_it, "{:10}", param);
+
   // currently the about output algorithm doesn't really respect whitespace
   // in the about code
   if (!about.empty()) {
+    out("   ");
     size_t row_length = f.cols - position;
     size_t rows = about.size() / row_length + 1;
     // this is a herustic to increase horizontal space if
     // too many rows would be required
     if (rows > 2) {
       // todo check under windows if \r is necessary or not
-      f.indent += 2;
+      f.indent += 8;
       newline();
     } else {
       f.indent = position;
@@ -510,24 +537,69 @@ void _generate_options_help(auto output_it, FormatOptions f,
         ++it;
       // find end of next word
       auto word_end = it;
-      while (!std::isspace(*word_end))
+      while (!std::isspace(*word_end) && word_end < about.end())
         ++word_end;
       // word would not fit on screen
       if (std::distance(it, word_end) + position > f.cols) {
         newline();
       }
       out(std::string_view(it, word_end));
+      out(" ");
+      it = word_end;
     }
   }
 }
 
-template <Arg A, Arg... As>
-void _gen_option_help(auto output_it, FormatOptions o) {
-  auto shortname = A::short_name().view(), longname = A::long_name().view(),
-       about = A::about().view();
-  _generate_options_help(output_it, o, shortname, longname, about);
-  *output_it++ = '\n';
-  _gen_option_help<As...>(output_it, o);
+template <str_const shorthand, str_const name, str_const about_s, bool is_sub,
+          typename... Args>
+constexpr void Parser<shorthand, name, about_s, is_sub, Args...>::output_help(
+    std::output_iterator<char const &> auto it, FormatOptions o) {
+  using std::fill_n;
+  using This = Parser<shorthand, name, about_s, is_sub, Args...>;
+  auto out = [&](std::string_view s) {
+    it = std::copy(s.begin(), s.end(), it);
+  };
+  if (This::has_about()) {
+    out(This::about().view());
+    *it++ = '\n';
+    *it++ = '\n';
+  }
+  _vArgument arguments[] = {Args::virtualize()...};
+
+  out(name.view());
+
+  for (_vArgument const &arg : arguments) {
+    if (arg.t != Type::Positional)
+      continue;
+    out(" <");
+    out(arg.longname);
+    out(">");
+  }
+
+  *it++ = '\n';
+  *it++ = '\n';
+
+  if ((Args::positional || ...)) {
+    out("Arguments:\n");
+    for (_vArgument const &arg : arguments) {
+      if (arg.t != Type::Positional)
+        continue;
+      it = fill_n(it, o.indent + 2, ' ');
+      std::format_to(it, "{:10}{}", arg.longname, arg.about);
+      *it++ = '\n';
+    }
+    *it++ = '\n';
+  }
+
+  it = fill_n(it, o.indent, ' ');
+  out("Usage: \n");
+  o.indent += 2;
+  for (_vArgument const &arg : arguments) {
+    if (arg.t != Type::Flag)
+      continue;
+    _generate_options_help(it, o, arg);
+    *it++ = '\n';
+  }
 }
 
 } // namespace clip

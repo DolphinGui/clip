@@ -1,5 +1,6 @@
 #include <clip/clip.hpp>
 #include <format>
+#include <iterator>
 #include <print>
 #include <variant>
 
@@ -10,7 +11,7 @@ using clip::Parser;
 using clip::positional;
 
 constexpr auto subcommand =
-    Parser<"se", "search", "runs search functions">{}
+    Parser<"se", "search", "runs search functions", true>{}
         .arg(Argument<std::string, positional, none, "FILE",
                       "file to be searched">{})
         .arg(Argument<std::vector<int>, flag, "l", "lines", "line numbers">{})
@@ -19,7 +20,9 @@ constexpr auto subcommand =
 constexpr auto parser =
     Parser<>{}
         .arg(subcommand)
-        .arg(Argument<bool, flag, none, "verbose", "increases verbosity">{})
+        .arg(Argument<
+             bool, flag, none, "verbose",
+             "increases verbosity fdsa fdsa fea fdsaf fdasfdsafads fdsafas">{})
         .arg(Argument<std::optional<std::string>, flag, "o", "output",
                       "output file">{});
 
@@ -30,4 +33,10 @@ int main(int argc, char **argv) {
   std::println(
       "results: {}, {}, {}, {}, {}", verbose, output.value_or("null"), file,
       lines, std::visit([](auto &&arg) { return std::format("{}", arg); }, v2));
+  std::string help, sub;
+  parser.output_help(std::back_inserter(help), {.cols = 30});
+  subcommand.output_help(std::back_inserter(sub), {.cols = 30});
+  std::println("help: {}", help);
+  std::println("subhelp: {}", sub);
 }
+
