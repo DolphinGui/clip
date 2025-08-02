@@ -40,11 +40,46 @@ struct argument_not_found : std::runtime_error {
       : std::runtime_error(std::format("Argument {} not found", option)) {}
 };
 
+enum struct Type { Flag, Positional, Subcommand };
+
 template <template <typename...> class Template, typename T>
 struct is_instantiation_of : std::false_type {};
 
 template <template <typename...> class Template, typename... Args>
 struct is_instantiation_of<Template, Template<Args...>> : std::true_type {};
+
+template <typename T> struct is_arg : std::false_type {};
+
+template <typename T>
+  requires(T::is_argument)
+struct is_arg<T> : std::true_type {};
+
+template <typename T>
+concept Arg = is_arg<T>::value;
+
+template <typename T> struct is_sub : std::false_type {};
+template <typename T>
+  requires(T::t == Type::Subcommand)
+struct is_sub<T> : std::true_type {};
+
+template <typename T>
+concept Sub = is_sub<T>::value;
+
+template <typename T> struct is_flag : std::false_type {};
+template <typename T>
+  requires(T::t == Type::Flag)
+struct is_flag<T> : std::true_type {};
+
+template <typename T>
+concept Flag = is_flag<T>::value;
+
+template <typename T> struct is_positional : std::false_type {};
+template <typename T>
+  requires(T::t == Type::Positional)
+struct is_positional<T> : std::true_type {};
+
+template <typename T>
+concept Pos = is_positional<T>::value;
 
 template <size_t len> struct str_const {
   char value[len + 1]{}; // literally just to avoid 0-len arrays
@@ -138,7 +173,7 @@ struct Argument {
   constexpr static bool has_about() { return about_s; }
   static_assert(has_short() || has_long(),
                 "unnnamed arguments are not allowed");
-  constexpr static bool positional = pos;
+  constexpr static Type t = pos ? Type::Positional : Type::Flag;
   // flag values are assumed not to be required, and only optional values
   // are assumed to be optional
   constexpr static bool required = req;
@@ -147,42 +182,15 @@ struct Argument {
 // The callback should _know_ the return type, and can just
 // write through a void*
 using ParseCallback = void (*)(void *, std::string_view);
-enum struct Type { Flag, Positional, Subcommand };
 struct _vArgument {
   std::string shortname = {};
   std::string longname = {};
   std::string about = {};
   std::string param = {};
+  std::vector<_vArgument> children; // subcommand flags
   ParseCallback parser = {};
   Type t;
 };
-
-template <typename T> struct is_arg : std::false_type {};
-
-template <typename T>
-  requires(T::is_argument)
-struct is_arg<T> : std::true_type {};
-
-template <typename... T>
-concept Arg = (... && is_arg<T>::value);
-
-template <typename T> struct is_positional : std::false_type {};
-
-template <typename T>
-  requires(T::is_positional)
-struct is_positional<T> : std::true_type {};
-
-template <typename... T>
-concept Positional = (... && is_positional<T>::value);
-
-template <typename T> struct is_subcommand : std::false_type {};
-
-template <typename T>
-  requires(T::is_subcommand)
-struct is_subcommand<T> : std::true_type {};
-
-template <typename... T>
-concept Sub = (... && is_subcommand<T>::value);
 
 template <typename T> constexpr std::string out_type();
 
@@ -194,6 +202,7 @@ Argument<T, pos, sname, lname, about_s, req>::virtualize() {
           long_name().str(),
           about().str(),
           out_type<T>(),
+          {},
           {},
           pos ? Type::Positional : Type::Flag};
 }
@@ -227,8 +236,8 @@ struct Parser {
 
   constexpr static bool is_argument = is_sub;
   constexpr static bool is_subcommand = is_sub;
-  constexpr static bool positional = false;
   constexpr static bool required = false;
+  constexpr static Type t = Type::Subcommand;
   constexpr static auto long_name() { return name; }
   constexpr static bool has_long() { return name; }
   constexpr static auto short_name() { return shorthand; }
@@ -239,7 +248,8 @@ struct Parser {
 
   constexpr static _vArgument virtualize() {
     return {
-        shorthand.str(), name.str(), about_s.str(), "", {}, Type::Subcommand,
+        shorthand.str(),         name.str(), about_s.str(),    "",
+        {Args::virtualize()...}, {},         Type::Subcommand,
     };
   }
 };
@@ -327,7 +337,9 @@ auto _parse(std::vector<std::string_view> &args, size_t pos) {
   using T = Argument::type;
   bool has_parsed = false;
   T value = {};
-  if constexpr (Argument::positional && !Sub<Argument>) {
+  if constexpr (Argument::t == Type::Positional) {
+    std::println("parsing {} at {}", Argument::long_name().str(), pos);
+    std::println("leftover args: {}", args);
     // positional parsing must always be done second
     auto a = args.begin() + pos;
     auto &arg = *a;
@@ -342,12 +354,13 @@ auto _parse(std::vector<std::string_view> &args, size_t pos) {
   } else
     for (auto a = args.begin(); a < args.end(); ++a) {
       auto const &arg = *a;
-      if constexpr (Sub<Argument>) {
+      if constexpr (Argument::t == Type::Subcommand) {
         // subcommands swallow up all subsequent flags if the match
         if ((Argument::has_long() && Argument::long_name() == arg) ||
             (Argument::has_short() && Argument::short_name() == arg)) {
-          auto arguments = std::vector<std::string_view>(
-              std::make_move_iterator(a + 1), std::move_iterator(args.end()));
+          std::vector<std::string_view> arguments;
+          arguments.reserve(args.end() - a - 1);
+          std::copy(a + 1, args.end(), std::back_inserter(arguments));
           args.erase(a, args.end());
           return Argument::parse(std::move(arguments));
         }
@@ -419,6 +432,7 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   auto eval_subcommand = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Sub<Argument>) {
+      std::println("parsing sub {}", Argument::long_name().str());
       return _parse<Argument>(args, 0);
     } else {
       return prev_val;
@@ -426,7 +440,8 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   };
   auto eval_nonpos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
-    if constexpr (Arg<Argument> && !Positional<Argument>) {
+    if constexpr (Flag<Argument>) {
+      std::println("parsing flag {}", Argument::long_name().str());
       return _parse<Argument>(args, 0);
     } else {
       return prev_val;
@@ -435,10 +450,11 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   int pos = 0;
   auto eval_pos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
-    if constexpr (!Arg<Argument>) {
-      return prev_val;
-    } else {
+    if constexpr (Arg<Argument>) {
+      std::println("parsing pos {}", Argument::long_name().str());
       return _parse<Argument>(args, pos++);
+    } else {
+      return prev_val;
     }
   };
 
@@ -483,7 +499,7 @@ template <typename T> constexpr std::string out_type() {
 // bloat
 void _generate_options_help(auto output_it, FormatOptions f,
                             _vArgument const &arg) {
-  auto &[sh, l, about, param, _parse, _t] = arg;
+  auto &[sh, l, about, param, _children, _parse, _t] = arg;
   size_t position = 0;
   auto pad = [&](size_t length) {
     output_it = std::fill_n(output_it, length, ' ');
@@ -579,7 +595,7 @@ constexpr void Parser<shorthand, name, about_s, is_sub, Args...>::output_help(
   *it++ = '\n';
   *it++ = '\n';
 
-  if ((Args::positional || ...)) {
+  if (((Args::t == Type::Positional) || ...)) {
     out("Arguments:\n");
     for (_vArgument const &arg : arguments) {
       if (arg.t != Type::Positional)
