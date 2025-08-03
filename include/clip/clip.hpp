@@ -1,11 +1,6 @@
-#ifdef __cpp_modules
-module;
-#define EXPORT export
-#else
 #pragma once
-#define EXPORT
-#endif
 
+#ifndef CLIP_IMPORT
 #include "tuplet/tuple.hpp"
 #include <charconv>
 #include <concepts>
@@ -13,16 +8,15 @@ module;
 #include <format>
 #include <iterator>
 #include <optional>
-#include <print>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
-
-#ifdef __cpp_modules
-export module clip;
+#else
+import std;
+import tuplet;
 #endif
 
 namespace clip {
@@ -190,6 +184,9 @@ struct _vArgument {
   std::vector<_vArgument> children; // subcommand flags
   ParseCallback parser = {};
   Type t;
+
+  inline bool has_short() const noexcept { return !shortname.empty(); }
+  inline bool is_boolean() const noexcept { return param.empty(); }
 };
 
 template <typename T> constexpr std::string out_type();
@@ -338,8 +335,8 @@ auto _parse(std::vector<std::string_view> &args, size_t pos) {
   bool has_parsed = false;
   T value = {};
   if constexpr (Argument::t == Type::Positional) {
-    std::println("parsing {} at {}", Argument::long_name().str(), pos);
-    std::println("leftover args: {}", args);
+    if (args.empty())
+      return T{};
     // positional parsing must always be done second
     auto a = args.begin() + pos;
     auto &arg = *a;
@@ -432,7 +429,6 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   auto eval_subcommand = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Sub<Argument>) {
-      std::println("parsing sub {}", Argument::long_name().str());
       return _parse<Argument>(args, 0);
     } else {
       return prev_val;
@@ -441,7 +437,6 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   auto eval_nonpos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Flag<Argument>) {
-      std::println("parsing flag {}", Argument::long_name().str());
       return _parse<Argument>(args, 0);
     } else {
       return prev_val;
@@ -451,7 +446,6 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   auto eval_pos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Arg<Argument>) {
-      std::println("parsing pos {}", Argument::long_name().str());
       return _parse<Argument>(args, pos++);
     } else {
       return prev_val;

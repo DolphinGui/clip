@@ -1,4 +1,5 @@
 #include <clip/clip.hpp>
+#include <clip/completions/zsh.hpp>
 #include <format>
 #include <iterator>
 #include <print>
@@ -18,13 +19,16 @@ constexpr auto subcommand =
         .arg(Argument<std::variant<int, std::string>, flag, "v", "verbose">{});
 
 constexpr auto parser =
-    Parser<>{}
+    Parser<none, "clip_test">{}
         .arg(subcommand)
         .arg(Argument<
              bool, flag, none, "verbose",
              "increases verbosity fdsa fdsa fea fdsaf fdasfdsafads fdsafas">{})
         .arg(Argument<std::optional<std::string>, flag, "o", "output",
                       "output file">{});
+
+constexpr auto completion =
+    clip::comp::zsh_completer<std::decay_t<decltype(parser)>>{};
 
 int main(int argc, char **argv) {
   auto g = parser.parse(argc, argv);
@@ -33,10 +37,12 @@ int main(int argc, char **argv) {
   std::println(
       "results: {}, {}, {}, {}, {}", verbose, output.value_or("null"), file,
       lines, std::visit([](auto &&arg) { return std::format("{}", arg); }, v2));
-  std::string help, sub;
+  std::string help, sub, comp;
   parser.output_help(std::back_inserter(help), {.cols = 30});
   subcommand.output_help(std::back_inserter(sub), {.cols = 30});
+  completion.completion(std::back_inserter(comp)); 
   std::println("help: {}", help);
   std::println("subhelp: {}", sub);
-}
 
+  std::println("completion: {}", comp);
+}
