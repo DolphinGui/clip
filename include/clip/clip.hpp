@@ -16,7 +16,8 @@
 #include <vector>
 #else
 import std;
-import tuplet;
+// necessary bc tuplet has an overload for get
+export import tuplet;
 #endif
 
 namespace clip {
