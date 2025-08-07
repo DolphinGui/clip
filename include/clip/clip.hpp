@@ -224,7 +224,7 @@ struct Parser {
     return parse(std::vector<std::string_view>(argv + 1, argv + argc));
   }
 
-  constexpr static std::string help();
+  constexpr static std::string help(FormatOptions);
   constexpr static void output_help(std::output_iterator<char const &> auto it,
                                     FormatOptions o);
 
@@ -577,13 +577,13 @@ Parser<shorthand, name, about_s, is_sub, is_def, Args...>::output_help(
     it = std::copy(s.begin(), s.end(), it);
   };
   if (This::has_about()) {
-    out(This::about().view());
+    out(This::about().str());
     *it++ = '\n';
     *it++ = '\n';
   }
   _vArgument arguments[] = {Args::virtualize()...};
 
-  out(name.view());
+  out(name.str());
 
   for (_vArgument const &arg : arguments) {
     if (arg.t != Type::Positional)
@@ -617,6 +617,16 @@ Parser<shorthand, name, about_s, is_sub, is_def, Args...>::output_help(
     _generate_options_help(it, o, arg);
     *it++ = '\n';
   }
+}
+
+template <str_const shorthand, str_const name, str_const about_s, bool is_sub,
+          bool is_def, typename... Args>
+constexpr std::string
+Parser<shorthand, name, about_s, is_sub, is_def, Args...>::help(
+    FormatOptions o) {
+  std::string s;
+  output_help(std::back_inserter(s), o);
+  return s;
 }
 
 } // namespace clip

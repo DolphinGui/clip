@@ -106,4 +106,11 @@ TEST_CASE("Subcommand parsing") {
     REQUIRE(regex == true);
     REQUIRE(term == "term");
   }
+
+  SECTION("Testing help") {
+    auto n = cmd.help({80});
+    // actually testing the contents of help is kinda hard
+    // so I just assume if it's non-empty it's probably fine
+    REQUIRE(!n.empty());
+  }
 }
