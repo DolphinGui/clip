@@ -166,7 +166,7 @@ struct Argument {
   constexpr static _vArgument virtualize();
 };
 
-constexpr static auto help_arg =
+constexpr inline auto help_arg =
     Argument<bool, flag, "h", "help", "Output command help", false>{};
 
 // The callback should _know_ the return type, and can just
