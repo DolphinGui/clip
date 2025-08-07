@@ -12,12 +12,13 @@
 #define TYPE_ASSERT(obj, type) static_assert(std::same_as<decltype(obj), type>)
 
 using clip::Argument;
+using clip::Command;
 using clip::flag;
 using clip::help_arg;
 using clip::none;
 using clip::Parser;
 using clip::positional;
-using clip::Subparser;
+using clip::Subcommand;
 
 template <typename T> using Opt = std::optional<T>;
 using Str = std::string;
@@ -25,7 +26,7 @@ using Args = std::vector<std::string_view>;
 
 TEST_CASE("Basic flag and positional parsing") {
   constexpr auto cmd =
-      Parser<none, "basic">{}
+      Command<none, "basic">{}
           .arg(Argument<Str, positional, none, "firstarg">{})
           .arg(Argument<Opt<Str>, flag, "o", "output">{})
           .arg(Argument<Str, positional, none, "secondarg", none, false>{})
@@ -57,14 +58,14 @@ TEST_CASE("Basic flag and positional parsing") {
 }
 
 TEST_CASE("Subcommand parsing") {
-  constexpr auto list = Subparser<"l", "list", none>{}.arg(help_arg);
+  constexpr auto list = Subcommand<"l", "list", none>{}.arg(help_arg);
   constexpr auto search =
-      Subparser<"se", "search", none, true>{}
+      Subcommand<"se", "search", none, true>{}
           .arg(help_arg)
           .arg(Argument<Opt<Str>, positional, none, "TERM">{})
           .arg(Argument<bool, flag, "r", "regex">{});
   constexpr auto cmd =
-      Parser<none, "cmd">{}.arg(help_arg).arg(list).arg(search);
+      Command<none, "cmd">{}.arg(help_arg).arg(list).arg(search);
   SECTION("Parsing just help") {
     Args as = {"--help"};
     auto [help, list, search] = cmd.parse(as);

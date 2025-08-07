@@ -250,7 +250,11 @@ struct Parser {
 };
 template <str_const shorthand, str_const name,
           str_const about_s = "Describe command here", bool def = false>
-using Subparser = Parser<shorthand, name, about_s, true, def>;
+using Subcommand = Parser<shorthand, name, about_s, true, def>;
+
+template <str_const shorthand, str_const name,
+          str_const about_s = "Describe command here">
+using Command = Parser<shorthand, name, about_s, false, false>;
 
 template <typename T>
 concept UserParsable = requires(std::string_view sv) {
