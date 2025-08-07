@@ -18,8 +18,8 @@ inline auto _complete_to(auto out_it, std::string_view command,
     -> decltype(out_it);
 
 template <str_const shorthand, str_const name, str_const about_s, bool is_sub,
-          typename... Args>
-struct zsh_completer<Parser<shorthand, name, about_s, is_sub, Args...>> {
+          bool def, typename... Args>
+struct zsh_completer<Parser<shorthand, name, about_s, is_sub, def, Args...>> {
   static_assert(!is_sub,
                 "Completion scripts cannot be created for subarguments");
 

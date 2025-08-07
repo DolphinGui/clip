@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/codeinred/tuplet.git
+revision = 31794880df5c13b17bc8214cb352a0eb9e6cebf4
+depth = 1
+patch_directory=tuplet
+
+[provide]
+tuplet = tuplet_dep
