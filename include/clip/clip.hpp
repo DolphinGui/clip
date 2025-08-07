@@ -75,21 +75,21 @@ struct is_positional<T> : std::true_type {};
 template <typename T>
 concept Pos = is_positional<T>::value;
 
-template <size_t len> struct str_const {
+template <std::size_t len> struct str_const {
   char value[len + 1]{}; // literally just to avoid 0-len arrays
   constexpr str_const() = default;
-  template <size_t strlen>
+  template <std::size_t strlen>
   constexpr str_const(const char (&lit)[strlen]) noexcept {
-    for (size_t i = 0; i < len; ++i) {
+    for (std::size_t i = 0; i < len; ++i) {
       value[i] = lit[i];
     }
   }
-  template <size_t begin, size_t end = len>
+  template <std::size_t begin, std::size_t end = len>
   constexpr str_const<end - begin> substr() const noexcept
     requires(end > begin && end <= len)
   {
     str_const<end - begin> result;
-    for (size_t i = 0; i != end - begin; ++i) {
+    for (std::size_t i = 0; i != end - begin; ++i) {
       result.value[i] = value[i + begin];
     }
     return result;
@@ -98,18 +98,18 @@ template <size_t len> struct str_const {
   constexpr char *data() { return value; }
   constexpr char *end() { return value + len; }
   constexpr bool operator==(str_const<len> s) const {
-    for (size_t i = 0; i < len; ++i) {
+    for (std::size_t i = 0; i < len; ++i) {
       if (s[i] != value[i])
         return false;
     }
     return true;
   }
-  template <size_t s>
+  template <std::size_t s>
     requires(s != len)
   constexpr bool operator==(str_const<s>) const {
     return false;
   }
-  constexpr char operator[](size_t i) { return value[i]; };
+  constexpr char operator[](std::size_t i) { return value[i]; };
   constexpr bool empty() const { return len == 0; }
   constexpr operator bool() const { return !empty(); }
   constexpr std::string str() const { return std::string(value, len); }
@@ -121,34 +121,34 @@ template <size_t len> struct str_const {
   }
   constexpr explicit operator std::string() const { return str(); }
   constexpr explicit operator std::string_view() const { return view(); }
-  constexpr static size_t length = len;
+  constexpr static std::size_t length = len;
 };
-template <size_t len>
+template <std::size_t len>
 constexpr bool operator==(str_const<len> lhs, std::string_view rhs) {
   if (len != rhs.size())
     return false;
-  for (size_t i = 0; i < len; ++i) {
+  for (std::size_t i = 0; i < len; ++i) {
     if (lhs[i] != rhs[i])
       return false;
   }
   return true;
 }
-template <size_t len>
+template <std::size_t len>
 constexpr bool operator==(std::string_view lhs, str_const<len> rhs) {
   return rhs == lhs;
 }
-template <size_t strlen>
+template <std::size_t strlen>
 str_const(const char (&lit)[strlen]) -> str_const<strlen - 1>;
 
 struct FormatOptions {
-  size_t cols = 0, indent = 0;
+  std::size_t cols = 0, indent = 0;
 };
 
 struct _vArgument;
 
-constexpr auto none = str_const<0>();
-constexpr bool positional = true;
-constexpr bool flag = false;
+constexpr inline auto none = str_const<0>();
+constexpr inline bool positional = true;
+constexpr inline bool flag = false;
 template <typename T, bool pos = false, str_const sname = none,
           str_const lname = none, str_const about_s = none,
           bool req = !std::same_as<bool, T> &&
@@ -265,7 +265,7 @@ concept Parsable = std::same_as<T, bool> || std::is_arithmetic_v<T> ||
 
 template <typename T>
 concept UserHelpable =
-    requires(std::back_insert_iterator<std::string> out, size_t indent) {
+    requires(std::back_insert_iterator<std::string> out, std::size_t indent) {
       { T::output_help(out, indent) } -> std::same_as<void>;
     };
 
@@ -330,7 +330,7 @@ _parse_variant(std::string_view sv) {
 }
 
 template <Arg Argument>
-auto _parse(std::vector<std::string_view> &args, size_t pos) {
+auto _parse(std::vector<std::string_view> &args, std::size_t pos) {
   using T = Argument::type;
   bool has_parsed = false;
   T value = {};
@@ -494,8 +494,8 @@ template <typename T> constexpr std::string out_type() {
 void _generate_options_help(auto output_it, FormatOptions f,
                             _vArgument const &arg) {
   auto &[sh, l, about, param, _children, _parse, _t] = arg;
-  size_t position = 0;
-  auto pad = [&](size_t length) {
+  std::size_t position = 0;
+  auto pad = [&](std::size_t length) {
     output_it = std::fill_n(output_it, length, ' ');
     position += length;
   };
@@ -529,8 +529,8 @@ void _generate_options_help(auto output_it, FormatOptions f,
   // in the about code
   if (!about.empty()) {
     out("   ");
-    size_t row_length = f.cols - position;
-    size_t rows = about.size() / row_length + 1;
+    std::size_t row_length = f.cols - position;
+    std::size_t rows = about.size() / row_length + 1;
     // this is a herustic to increase horizontal space if
     // too many rows would be required
     if (rows > 2) {

@@ -1,4 +1,5 @@
 module;
+
 #define CLIP_IMPORT
 #include "clip/clip.hpp"
 #include "clip/completions/zsh.hpp"
@@ -6,12 +7,18 @@ module;
 export module clip;
 
 export namespace clip {
-using ::Argument;
-using ::Parser;
-using ::tuplet;
-using ::user_out_type;
-using ::UserParsable;
+using clip::Argument;
+using clip::Parser;
+
+using clip::tuple;
+using clip::user_out_type;
+using clip::UserParsable;
+
+using clip::flag;
+using clip::none;
+using clip::positional;
+
 namespace comp {
-using ::zsh_completer;
+using clip::comp::zsh_completer;
 }
 } // namespace clip
