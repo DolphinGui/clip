@@ -11,24 +11,29 @@ import std;
 
 namespace clip::comp {
 
-template <typename T> struct zsh_completer;
+template <typename T> struct Zsh;
 
 inline auto _complete_to(auto out_it, std::string_view command,
                          std::span<const _vArgument> args, bool prologue)
     -> decltype(out_it);
 
 template <str_const shorthand, str_const name, str_const about_s, bool is_sub,
-          bool def, typename... Args>
-struct zsh_completer<Parser<shorthand, name, about_s, is_sub, def, Args...>> {
+          typename... Args>
+struct Zsh<Parser<shorthand, name, about_s, is_sub, Args...>> {
   static_assert(!is_sub,
                 "Completion scripts cannot be created for subarguments");
 
   static auto completion(auto output_iterator) -> decltype(output_iterator) {
     std::vector<_vArgument> args = {Args::virtualize()...};
     str_const n = name;
-    return _complete_to(output_iterator, n.view(), args, true);
+    return _complete_to(output_iterator, n.str(), args, true);
   }
 };
+
+template <typename Parser, typename OutputIt>
+inline auto complete_zsh(Parser, OutputIt out) {
+  return Zsh<Parser>::completion(out);
+}
 
 inline auto _complete_to(auto out_it, std::string_view command,
                          std::span<const _vArgument> args, bool prologue)

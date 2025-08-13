@@ -1,8 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "clip/clip.hpp"
+#include "clip/completions/zsh.hpp"
 
 #include <concepts>
+#include <iterator>
 #include <optional>
 #include <print>
 #include <string>
@@ -20,6 +22,7 @@ using clip::none;
 using clip::Parser;
 using clip::positional;
 using clip::Subcommand;
+using clip::comp::complete_zsh;
 
 template <typename T> using Opt = std::optional<T>;
 using Str = std::string;
@@ -119,11 +122,25 @@ TEST_CASE("Subcommand parsing") {
     auto [_h, l, _s] = cmd.parse(as2);
     REQUIRE(l == list);
   }
+}
+
+TEST_CASE("Testing generation functions") {
+
+  constexpr auto cmd = Command<none, "search", none>{}
+                           .arg(help_arg)
+                           .arg(Argument<Opt<Str>, positional, none, "TERM">{})
+                           .arg(Argument<bool, flag, "r", "regex">{});
 
   SECTION("Testing help") {
     auto n = cmd.help({80});
     // actually testing the contents of help is kinda hard
     // so I just assume if it's non-empty it's probably fine
     REQUIRE(!n.empty());
+  }
+
+  SECTION("Testing completion") {
+    Str result;
+    complete_zsh(cmd, std::back_inserter(result));
+    REQUIRE(!result.empty());
   }
 }
