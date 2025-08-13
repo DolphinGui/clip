@@ -8,7 +8,7 @@
 #include <optional>
 #include <print>
 #include <string>
-#include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -126,16 +126,21 @@ TEST_CASE("Subcommand parsing") {
 
 TEST_CASE("Testing generation functions") {
 
+  constexpr auto list = Subcommand<"l", "list", none>{}.arg(help_arg);
   constexpr auto cmd = Command<none, "search", none>{}
                            .arg(help_arg)
                            .arg(Argument<Opt<Str>, positional, none, "TERM">{})
-                           .arg(Argument<bool, flag, "r", "regex">{});
+                           .arg(Argument<bool, flag, "r", "regex">{})
+                           .arg(list);
 
   SECTION("Testing help") {
-    auto n = cmd.help({80});
+    using namespace clip::literals;
+    auto n = cmd.help({80}, 0_tag);
     // actually testing the contents of help is kinda hard
     // so I just assume if it's non-empty it's probably fine
     REQUIRE(!n.empty());
+    auto m = cmd.help({80}, 1_tag);
+    REQUIRE(!m.empty());
   }
 
   SECTION("Testing completion") {

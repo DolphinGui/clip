@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #ifndef CLIP_IMPORT
 #include "tuplet/tuple.hpp"
 #include <charconv>
@@ -112,18 +113,24 @@ Argument<T, pos, sname, lname, about_s, req>::virtualize() {
           pos ? Type::Positional : Type::Flag};
 }
 
-template <typename T, Arg A> struct DefaultResult : public std::optional<T> {
-  using argument_type = A;
-};
-
 template <Arg... Args> auto _parse_tuple(std::vector<std::string> &args);
+template <typename Out, typename... Args> struct _help_ptr_m;
+
+template <typename Out, typename... Args>
+using _help_ptrs = _help_ptr_m<Out, Args...>::type;
+
+namespace literals {
+using tuplet::literals::operator""_tag;
+};
 
 template <str_const shorthand = none, str_const name = "COMMAND",
           str_const about_s = "Describe command here", bool is_sub = false,
           typename... Args>
 struct Parser {
   template <Arg A> constexpr auto arg(A = {}) {
-    return Parser<shorthand, name, about_s, is_subcommand, Args..., A>{};
+    if constexpr (A::t == Type::Subcommand) {
+    }
+    return Parser<shorthand, name, about_s, is_sub, Args..., A>{};
   }
   constexpr static auto parse(std::vector<std::string> arguments) {
     auto n = _parse_tuple<Args...>(arguments);
@@ -139,17 +146,36 @@ struct Parser {
     return parse(std::vector<std::string>(argv + 1, argv + argc));
   }
 
-  constexpr static std::string help(FormatOptions);
-  constexpr static void output_help(std::output_iterator<char const &> auto it,
-                                    FormatOptions o);
+  constexpr static bool is_subcommand = is_sub;
+
+  template <size_t index>
+  constexpr static std::string help(FormatOptions o,
+                                    std::integral_constant<size_t, index>)
+    requires(!Parser::is_subcommand)
+  {
+    std::string s;
+    if constexpr (index == 0) {
+      _output_help(std::back_inserter(s), o, {});
+    } else {
+      using ptrs = _help_ptrs<std::back_insert_iterator<std::string>, Args...>;
+      static_assert(index - 1 < ptrs::size, "Help index is out of bounds");
+      auto helps = ptrs::value;
+      helps[index - 1](std::back_inserter(s), o, name.str());
+    }
+    return s;
+  }
+
+  constexpr static void _output_help(std::output_iterator<char const &> auto,
+                                     FormatOptions, std::string_view);
 
   constexpr static bool is_argument = is_sub;
-  constexpr static bool is_subcommand = is_sub;
   constexpr static bool required = false;
   constexpr static Type t = Type::Subcommand;
   constexpr static auto long_name() { return name; }
+  constexpr static auto long_n = name;
   constexpr static bool has_long() { return name; }
   constexpr static auto short_name() { return shorthand; }
+  constexpr static auto short_n = shorthand;
   constexpr static bool has_short() { return shorthand; }
   constexpr static auto about() { return about_s; }
   constexpr static bool has_about() { return about_s; }
@@ -173,6 +199,8 @@ using Subcommand = Parser<shorthand, name, about_s, true>;
 template <str_const shorthand, str_const name,
           str_const about_s = "Describe command here">
 using Command = Parser<shorthand, name, about_s, false>;
+
+// Mostly implementation below this point
 
 template <typename T>
 concept UserParsable = requires(std::string_view sv) {
@@ -207,10 +235,10 @@ std::expected<T, std::string> parse_string(std::string_view sv) {
     return std::string(sv);
   } else if constexpr (UserParsable<T>) {
     return T::parse(sv);
-  } else if constexpr (is_instantiation_of<std::optional, T>::value) {
+  } else if constexpr (meta::is_instantiation_of<std::optional, T>) {
     using Inner = std::decay_t<decltype(std::declval<T>().value())>;
     return parse_string<Inner>(sv);
-  } else if constexpr (is_instantiation_of<std::variant, T>::value) {
+  } else if constexpr (meta::is_instantiation_of<std::variant, T>) {
     static_assert(std::variant_size_v<T> > 0, "Cannot parse empty variant");
     return [&]<typename... Ts>(std::variant<Ts...>) {
       return _parse_variant<Ts...>(sv);
@@ -345,7 +373,7 @@ template <Flag Argument> auto _parse_flag(std::vector<std::string> &args) {
         if (val->starts_with("-"))
           throw parse_error(Argument::long_name().str(),
                             std::format("Expected value, not flag {}", *val));
-        if constexpr (is_instantiation_of<std::vector, T>::value) {
+        if constexpr (meta::is_instantiation_of<std::vector, T>) {
           using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
           auto result = parse_string<Inner>(*val);
           if (!result)
@@ -410,13 +438,13 @@ template <typename T> constexpr std::string out_type() {
     return "NUM";
   else if constexpr (std::is_convertible_v<T, std::string>) {
     return "STR";
-  } else if constexpr (is_instantiation_of<std::optional, T>::value) {
+  } else if constexpr (meta::is_instantiation_of<std::optional, T>) {
     using Inner = std::decay_t<decltype(std::declval<T>().value())>;
     return out_type<Inner>() + "?";
-  } else if constexpr (is_instantiation_of<std::vector, T>::value) {
+  } else if constexpr (meta::is_instantiation_of<std::vector, T>) {
     using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
     return out_type<Inner>();
-  } else if constexpr (is_instantiation_of<std::variant, T>::value) {
+  } else if constexpr (meta::is_instantiation_of<std::variant, T>) {
     return _variant_out_type(T{});
   } else {
     return user_out_type<T>();
@@ -495,23 +523,75 @@ void _generate_options_help(auto output_it, FormatOptions f,
   }
 }
 
-template <str_const shorthand, str_const name, str_const about_s, bool is_sub,
+auto _print_help(auto it, std::span<_vArgument> arguments, FormatOptions o,
+                 std::string_view long_name, std::string_view about,
+                 std::string_view sup, bool subcommand, bool pos, bool flags);
+
+template <str_const shorthand, str_const name, str_const about_s, bool is_sup,
           typename... Args>
-constexpr void Parser<shorthand, name, about_s, is_sub, Args...>::output_help(
-    std::output_iterator<char const &> auto it, FormatOptions o) {
+constexpr void Parser<shorthand, name, about_s, is_sup, Args...>::_output_help(
+    std::output_iterator<char const &> auto it, FormatOptions o,
+    std::string_view sup) {
+  if constexpr (sizeof...(Args) > 0) {
+    _vArgument arguments[] = {Args::virtualize()...};
+    _print_help(it, arguments, o, long_n.str(), about_s.str(), sup,
+                ((Args::t == Type::Subcommand) || ...),
+                ((Args::t == Type::Positional) || ...),
+                ((Args::t == Type::Flag) || ...));
+  } else {
+    // no 0-length arrays allowed, also 0-length arrays
+    // dont cast to span for some reason
+    _print_help(it, {}, o, long_n.str(), about_s.str(), sup,
+                ((Args::t == Type::Subcommand) || ...),
+                ((Args::t == Type::Positional) || ...),
+                ((Args::t == Type::Flag) || ...));
+  }
+}
+
+template <typename...> struct _filter_subs;
+template <typename T, typename... Rest>
+struct _filter_subs<T, Rest...>
+    : meta::returns<
+          meta::if_else<T::t == Type::Subcommand,
+                        meta::push<T, typename _filter_subs<Rest...>::type>,
+                        typename _filter_subs<Rest...>::type>> {};
+
+template <> struct _filter_subs<> : meta::returns<meta::tuple<>> {};
+
+template <std::output_iterator<char const &> Out>
+using _out_ptr = void (*)(Out, FormatOptions, std::string_view);
+
+template <typename Out, typename> struct _apply_subs;
+template <typename Out, Sub... Subarguments>
+struct _apply_subs<Out, meta::tuple<Subarguments...>> {
+  constexpr static std::size_t size =
+      meta::sizeof_tuple<meta::tuple<Subarguments...>>;
+  constexpr static _out_ptr<Out> value[] = {&Subarguments::_output_help...};
+};
+
+template <typename Out, typename... Args>
+struct _help_ptr_m
+    : meta::returns<_apply_subs<Out, typename _filter_subs<Args...>::type>> {};
+
+auto _print_help(auto it, std::span<_vArgument> arguments, FormatOptions o,
+                 std::string_view long_name, std::string_view about,
+                 std::string_view sup, bool subcommand, bool pos, bool flags) {
   using std::fill_n;
-  using This = Parser<shorthand, name, about_s, is_sub, Args...>;
   auto out = [&](std::string_view s) {
     it = std::copy(s.begin(), s.end(), it);
   };
-  if (This::has_about()) {
-    out(This::about().str());
+
+  if (!about.empty()) {
+    out(about);
     *it++ = '\n';
     *it++ = '\n';
   }
-  _vArgument arguments[] = {Args::virtualize()...};
 
-  out(name.str());
+  if (!sup.empty()) {
+    out(sup);
+    out(" ");
+  }
+  out(long_name);
 
   for (_vArgument const &arg : arguments) {
     if (arg.t != Type::Positional)
@@ -524,7 +604,19 @@ constexpr void Parser<shorthand, name, about_s, is_sub, Args...>::output_help(
   *it++ = '\n';
   *it++ = '\n';
 
-  if (((Args::t == Type::Positional) || ...)) {
+  if (subcommand) {
+    out("Subcommands:\n");
+    for (_vArgument const &arg : arguments) {
+      if (arg.t != Type::Subcommand)
+        continue;
+      it = fill_n(it, o.indent + 2, ' ');
+      std::format_to(it, "{:10}{}", arg.longname, arg.about);
+      *it++ = '\n';
+    }
+    *it++ = '\n';
+  }
+
+  if (pos) {
     out("Arguments:\n");
     for (_vArgument const &arg : arguments) {
       if (arg.t != Type::Positional)
@@ -536,24 +628,16 @@ constexpr void Parser<shorthand, name, about_s, is_sub, Args...>::output_help(
     *it++ = '\n';
   }
 
-  it = fill_n(it, o.indent, ' ');
-  out("Usage: \n");
-  o.indent += 2;
-  for (_vArgument const &arg : arguments) {
-    if (arg.t != Type::Flag)
-      continue;
-    _generate_options_help(it, o, arg);
-    *it++ = '\n';
+  if (flags) {
+    out("Usage: \n");
+    o.indent += 2;
+    for (_vArgument const &arg : arguments) {
+      if (arg.t != Type::Flag)
+        continue;
+      _generate_options_help(it, o, arg);
+      *it++ = '\n';
+    }
   }
+  return it;
 }
-
-template <str_const shorthand, str_const name, str_const about_s, bool is_sub,
-          typename... Args>
-constexpr std::string
-Parser<shorthand, name, about_s, is_sub, Args...>::help(FormatOptions o) {
-  std::string s;
-  output_help(std::back_inserter(s), o);
-  return s;
-}
-
 } // namespace clip

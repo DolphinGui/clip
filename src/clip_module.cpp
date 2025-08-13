@@ -21,8 +21,12 @@ using clip::help_arg;
 using clip::none;
 using clip::positional;
 
+namespace literals {
+using clip::literals::operator""_tag;
+};
+
 namespace comp {
-using clip::comp::Zsh;
 using clip::comp::complete_zsh;
-}
+using clip::comp::Zsh;
+} // namespace comp
 } // namespace clip
