@@ -313,109 +313,6 @@ _parse_variant(std::string_view sv) {
   }
 }
 
-template <Arg Argument> auto _parse(std::vector<std::string> &args) {
-  using T = Argument::type;
-  bool has_parsed = false;
-  T value = {};
-  if constexpr (Argument::t == Type::Positional) {
-    if (args.empty())
-      return T{};
-    // positional parsing must always be done second
-    auto a = args.begin();
-    auto &arg = *a;
-    if (arg.starts_with("-"))
-      throw parse_error(Argument::long_name().str(),
-                        std::format("Expected value, not flag {}", arg));
-    auto result = parse_string<T>(arg);
-    if (!result)
-      throw parse_error(Argument::long_name().str(), result.error());
-    args.erase(a);
-    return *result;
-  } else {
-    for (auto a = args.begin(); a < args.end(); ++a) {
-      auto &arg = *a;
-      if constexpr (Argument::t == Type::Subcommand) {
-        bool match = (Argument::has_long() && Argument::long_name() == arg) ||
-                     (Argument::has_short() && Argument::short_name() == arg);
-        if (match) {
-          std::vector<std::string> arguments;
-          auto begin = match ? a + 1 : a;
-          arguments.reserve(args.end() - a);
-          std::copy(begin, args.end(), std::back_inserter(arguments));
-          args.erase(a, args.end());
-          return Argument::parse(std::move(arguments));
-        }
-      } else {
-        if constexpr (std::same_as<T, bool>) {
-          bool long_flag = Argument::has_long() && arg.starts_with("--") &&
-                           arg.substr(2) == Argument::long_name();
-
-          bool short_flag = Argument::has_short() && arg.starts_with("-") &&
-                            arg.contains(Argument::short_name().str());
-          bool short_flag_not_short = Argument::short_name().length != 1;
-          bool short_flag_exact = arg.length() == 2;
-          bool remove_short =
-              (short_flag && (short_flag_not_short || short_flag_exact));
-
-          if (long_flag || remove_short) {
-            // must be a flag, set flag to true
-            a = args.erase(a) - 1;
-            value = true;
-            has_parsed = true;
-            continue;
-          } else if (short_flag) {
-            char l = Argument::short_name()[0];
-            std::erase(arg, l);
-            value = true;
-            has_parsed = true;
-            continue;
-          }
-        } else {
-          bool long_arg = Argument::has_long() && arg.starts_with("--") &&
-                          arg.substr(2) == Argument::long_name();
-          bool short_arg = Argument::has_short() && arg.starts_with("-") &&
-                           arg.substr(1) == Argument::short_name();
-          if (short_arg || long_arg) {
-            // not a flag, parse next string and remove them from the vector
-            auto val = a + 1;
-            if (val >= args.end()) {
-              throw parse_error(Argument::long_name().str(),
-                                "Expected value, found none");
-            }
-            if (val->starts_with("-"))
-              throw parse_error(
-                  Argument::long_name().str(),
-                  std::format("Expected value, not flag {}", *val));
-            if constexpr (is_instantiation_of<std::vector, T>::value) {
-              using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
-              auto result = parse_string<Inner>(*val);
-              if (!result)
-                throw parse_error(Argument::long_name().str(), result.error());
-              value.push_back(*result);
-              a = args.erase(a, a + 2) - 1;
-              has_parsed = true;
-              continue;
-            } else {
-              auto result = parse_string<T>(*val);
-              if (!result)
-                throw parse_error(Argument::long_name().str(), result.error());
-              a = args.erase(a, a + 2) - 1;
-              value = *result;
-              has_parsed = true;
-              continue;
-            }
-          }
-        }
-      }
-    }
-  }
-  if (Argument::required && !has_parsed)
-    throw argument_not_found(Argument::has_long()
-                                 ? Argument::long_name().str()
-                                 : Argument::short_name().str());
-  return value;
-}
-
 template <typename T> struct is_sub : std::false_type {};
 template <typename T>
   requires(T::t == Type::Subcommand)
@@ -436,15 +333,21 @@ template <typename T> struct is_positional : std::false_type {};
 template <typename T>
   requires(T::t == Type::Positional)
 struct is_positional<T> : std::true_type {};
-
 template <typename T>
 concept Pos = is_positional<T>::value;
+
+template <Sub Subcommand> auto _parse_subcommand(std::vector<std::string> &);
+
+template <Flag Flag> auto _parse_flag(std::vector<std::string> &);
+
+template <Pos Positional> auto _parse_positional(std::vector<std::string> &);
+
 template <Arg... Args> auto _parse_tuple(std::vector<std::string> &args) {
   tuple<Args...> result = {};
   auto eval_subcommand = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Sub<Argument>) {
-      return _parse<Argument>(args);
+      return _parse_subcommand<Argument>(args);
     } else {
       return prev_val;
     }
@@ -452,7 +355,7 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string> &args) {
   auto eval_nonpos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Flag<Argument>) {
-      return _parse<Argument>(args);
+      return _parse_flag<Argument>(args);
     } else {
       return prev_val;
     }
@@ -460,13 +363,119 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string> &args) {
   auto eval_pos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Arg<Argument>) {
-      return _parse<Argument>(args);
+      return _parse_positional<Argument>(args);
     } else {
       return prev_val;
     }
   };
 
   return result.map(eval_subcommand).map(eval_nonpos).map(eval_pos);
+}
+
+template <Sub Argument> auto _parse_subcommand(std::vector<std::string> &args) {
+  for (auto a = args.begin(); a < args.end(); ++a) {
+    bool match = (Argument::has_long() && Argument::long_name() == *a) ||
+                 (Argument::has_short() && Argument::short_name() == *a);
+    if (match) {
+      std::vector<std::string> arguments;
+      auto begin = match ? a + 1 : a;
+      arguments.reserve(args.end() - a);
+      std::copy(begin, args.end(), std::back_inserter(arguments));
+      args.erase(a, args.end());
+      return Argument::parse(std::move(arguments));
+    }
+  }
+  return typename Argument::type{};
+}
+
+template <Flag Argument> auto _parse_flag(std::vector<std::string> &args) {
+  using T = Argument::type;
+  bool has_parsed = false;
+  T value = {};
+  for (auto a = args.begin(); a < args.end(); ++a) {
+    auto &arg = *a;
+    if constexpr (std::same_as<T, bool>) {
+      bool long_flag = Argument::has_long() && arg.starts_with("--") &&
+                       arg.substr(2) == Argument::long_name();
+
+      bool short_flag = Argument::has_short() && arg.starts_with("-") &&
+                        arg.contains(Argument::short_name().str());
+      bool short_flag_not_short = Argument::short_name().length != 1;
+      bool short_flag_exact = arg.length() == 2;
+      bool remove_short =
+          (short_flag && (short_flag_not_short || short_flag_exact));
+
+      if (long_flag || remove_short) {
+        // must be a flag, set flag to true
+        a = args.erase(a) - 1;
+        value = true;
+        has_parsed = true;
+        continue;
+      } else if (short_flag) {
+        char l = Argument::short_name()[0];
+        std::erase(arg, l);
+        value = true;
+        has_parsed = true;
+        continue;
+      }
+    } else {
+      bool long_arg = Argument::has_long() && arg.starts_with("--") &&
+                      arg.substr(2) == Argument::long_name();
+      bool short_arg = Argument::has_short() && arg.starts_with("-") &&
+                       arg.substr(1) == Argument::short_name();
+      if (short_arg || long_arg) {
+        // not a flag, parse next string and remove them from the vector
+        auto val = a + 1;
+        if (val >= args.end()) {
+          throw parse_error(Argument::long_name().str(),
+                            "Expected value, found none");
+        }
+        if (val->starts_with("-"))
+          throw parse_error(Argument::long_name().str(),
+                            std::format("Expected value, not flag {}", *val));
+        if constexpr (is_instantiation_of<std::vector, T>::value) {
+          using Inner = std::decay_t<decltype(std::declval<T>()[0])>;
+          auto result = parse_string<Inner>(*val);
+          if (!result)
+            throw parse_error(Argument::long_name().str(), result.error());
+          value.push_back(*result);
+          a = args.erase(a, a + 2) - 1;
+          has_parsed = true;
+          continue;
+        } else {
+          auto result = parse_string<T>(*val);
+          if (!result)
+            throw parse_error(Argument::long_name().str(), result.error());
+          a = args.erase(a, a + 2) - 1;
+          value = *result;
+          has_parsed = true;
+          continue;
+        }
+      }
+    }
+  }
+  if (Argument::required && !has_parsed)
+    throw argument_not_found(Argument::has_long()
+                                 ? Argument::long_name().str()
+                                 : Argument::short_name().str());
+  return value;
+}
+
+template <Pos Argument> auto _parse_positional(std::vector<std::string> &args) {
+  using T = Argument::type;
+  if (args.empty())
+    return T{};
+  // positional parsing must always be done second
+  auto a = args.begin();
+  auto &arg = *a;
+  if (arg.starts_with("-"))
+    throw parse_error(Argument::long_name().str(),
+                      std::format("Expected value, not flag {}", arg));
+  auto result = parse_string<T>(arg);
+  if (!result)
+    throw parse_error(Argument::long_name().str(), result.error());
+  args.erase(a);
+  return *result;
 }
 
 template <typename T> constexpr std::string user_out_type() = delete;
