@@ -52,30 +52,6 @@ struct is_arg<T> : std::true_type {};
 template <typename T>
 concept Arg = is_arg<T>::value;
 
-template <typename T> struct is_sub : std::false_type {};
-template <typename T>
-  requires(T::t == Type::Subcommand)
-struct is_sub<T> : std::true_type {};
-
-template <typename T>
-concept Sub = is_sub<T>::value;
-
-template <typename T> struct is_flag : std::false_type {};
-template <typename T>
-  requires(T::t == Type::Flag)
-struct is_flag<T> : std::true_type {};
-
-template <typename T>
-concept Flag = is_flag<T>::value;
-
-template <typename T> struct is_positional : std::false_type {};
-template <typename T>
-  requires(T::t == Type::Positional)
-struct is_positional<T> : std::true_type {};
-
-template <typename T>
-concept Pos = is_positional<T>::value;
-
 template <std::size_t len> struct str_const {
   char value[len + 1]{}; // literally just to avoid 0-len arrays
   constexpr str_const() = default;
@@ -166,9 +142,6 @@ struct Argument {
   constexpr static _vArgument virtualize();
 };
 
-constexpr inline auto help_arg =
-    Argument<bool, flag, "h", "help", "Output command help", false>{};
-
 // The callback should _know_ the return type, and can just
 // write through a void*
 using ParseCallback = void (*)(void *, std::string_view);
@@ -200,17 +173,20 @@ Argument<T, pos, sname, lname, about_s, req>::virtualize() {
           pos ? Type::Positional : Type::Flag};
 }
 
-template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args);
+template <typename T, Arg A> struct DefaultResult : public std::optional<T> {
+  using argument_type = A;
+};
+
+template <Arg... Args> auto _parse_tuple(std::vector<std::string> &args);
 
 template <str_const shorthand = none, str_const name = "COMMAND",
           str_const about_s = "Describe command here", bool is_sub = false,
-          bool def = false, typename... Args>
+          typename... Args>
 struct Parser {
   template <Arg A> constexpr auto arg(A = {}) {
-    return Parser<shorthand, name, about_s, is_subcommand, default_arg, Args...,
-                  A>{};
+    return Parser<shorthand, name, about_s, is_subcommand, Args..., A>{};
   }
-  constexpr static auto parse(std::vector<std::string_view> arguments) {
+  constexpr static auto parse(std::vector<std::string> arguments) {
     auto n = _parse_tuple<Args...>(arguments);
     if (!arguments.empty())
       throw parse_error(std::string(arguments.front()), "Unknown option");
@@ -221,7 +197,7 @@ struct Parser {
     }
   }
   constexpr static auto parse(int argc, char *argv[]) {
-    return parse(std::vector<std::string_view>(argv + 1, argv + argc));
+    return parse(std::vector<std::string>(argv + 1, argv + argc));
   }
 
   constexpr static std::string help(FormatOptions);
@@ -238,7 +214,6 @@ struct Parser {
   constexpr static bool has_short() { return shorthand; }
   constexpr static auto about() { return about_s; }
   constexpr static bool has_about() { return about_s; }
-  constexpr static bool default_arg = def;
   using type = decltype(Parser::parse(0, nullptr));
 
   constexpr static _vArgument virtualize() {
@@ -248,13 +223,17 @@ struct Parser {
     };
   }
 };
-template <str_const shorthand, str_const name,
-          str_const about_s = "Describe command here", bool def = false>
-using Subcommand = Parser<shorthand, name, about_s, true, def>;
+
+constexpr inline auto help_arg =
+    Argument<bool, flag, "h", "help", "Output command help", false>{};
 
 template <str_const shorthand, str_const name,
           str_const about_s = "Describe command here">
-using Command = Parser<shorthand, name, about_s, false, false>;
+using Subcommand = Parser<shorthand, name, about_s, true>;
+
+template <str_const shorthand, str_const name,
+          str_const about_s = "Describe command here">
+using Command = Parser<shorthand, name, about_s, false>;
 
 template <typename T>
 concept UserParsable = requires(std::string_view sv) {
@@ -334,8 +313,7 @@ _parse_variant(std::string_view sv) {
   }
 }
 
-template <Arg Argument>
-auto _parse(std::vector<std::string_view> &args, std::size_t pos) {
+template <Arg Argument> auto _parse(std::vector<std::string> &args) {
   using T = Argument::type;
   bool has_parsed = false;
   T value = {};
@@ -343,7 +321,7 @@ auto _parse(std::vector<std::string_view> &args, std::size_t pos) {
     if (args.empty())
       return T{};
     // positional parsing must always be done second
-    auto a = args.begin() + pos;
+    auto a = args.begin();
     auto &arg = *a;
     if (arg.starts_with("-"))
       throw parse_error(Argument::long_name().str(),
@@ -355,15 +333,13 @@ auto _parse(std::vector<std::string_view> &args, std::size_t pos) {
     return *result;
   } else {
     for (auto a = args.begin(); a < args.end(); ++a) {
-      auto const &arg = *a;
+      auto &arg = *a;
       if constexpr (Argument::t == Type::Subcommand) {
         bool match = (Argument::has_long() && Argument::long_name() == arg) ||
                      (Argument::has_short() && Argument::short_name() == arg);
-        bool default_sub = Argument::default_arg && !arg.starts_with("-");
-        // default subcommands act similarly to positional arguments
-        if (match || default_sub) {
-          std::vector<std::string_view> arguments;
-          auto begin = default_sub ? a : a + 1;
+        if (match) {
+          std::vector<std::string> arguments;
+          auto begin = match ? a + 1 : a;
           arguments.reserve(args.end() - a);
           std::copy(begin, args.end(), std::back_inserter(arguments));
           args.erase(a, args.end());
@@ -376,10 +352,20 @@ auto _parse(std::vector<std::string_view> &args, std::size_t pos) {
 
           bool short_flag = Argument::has_short() && arg.starts_with("-") &&
                             arg.contains(Argument::short_name().str());
+          bool short_flag_not_short = Argument::short_name().length != 1;
+          bool short_flag_exact = arg.length() == 2;
+          bool remove_short =
+              (short_flag && (short_flag_not_short || short_flag_exact));
 
-          if (long_flag || short_flag) {
+          if (long_flag || remove_short) {
             // must be a flag, set flag to true
             a = args.erase(a) - 1;
+            value = true;
+            has_parsed = true;
+            continue;
+          } else if (short_flag) {
+            char l = Argument::short_name()[0];
+            std::erase(arg, l);
             value = true;
             has_parsed = true;
             continue;
@@ -430,12 +416,35 @@ auto _parse(std::vector<std::string_view> &args, std::size_t pos) {
   return value;
 }
 
-template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
+template <typename T> struct is_sub : std::false_type {};
+template <typename T>
+  requires(T::t == Type::Subcommand)
+struct is_sub<T> : std::true_type {};
+
+template <typename T>
+concept Sub = is_sub<T>::value;
+
+template <typename T> struct is_flag : std::false_type {};
+template <typename T>
+  requires(T::t == Type::Flag)
+struct is_flag<T> : std::true_type {};
+
+template <typename T>
+concept Flag = is_flag<T>::value;
+
+template <typename T> struct is_positional : std::false_type {};
+template <typename T>
+  requires(T::t == Type::Positional)
+struct is_positional<T> : std::true_type {};
+
+template <typename T>
+concept Pos = is_positional<T>::value;
+template <Arg... Args> auto _parse_tuple(std::vector<std::string> &args) {
   tuple<Args...> result = {};
   auto eval_subcommand = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Sub<Argument>) {
-      return _parse<Argument>(args, 0);
+      return _parse<Argument>(args);
     } else {
       return prev_val;
     }
@@ -443,16 +452,15 @@ template <Arg... Args> auto _parse_tuple(std::vector<std::string_view> &args) {
   auto eval_nonpos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Flag<Argument>) {
-      return _parse<Argument>(args, 0);
+      return _parse<Argument>(args);
     } else {
       return prev_val;
     }
   };
-  int pos = 0;
   auto eval_pos = [&](auto &&prev_val) {
     using Argument = std::decay_t<decltype(prev_val)>;
     if constexpr (Arg<Argument>) {
-      return _parse<Argument>(args, pos++);
+      return _parse<Argument>(args);
     } else {
       return prev_val;
     }
@@ -567,12 +575,11 @@ void _generate_options_help(auto output_it, FormatOptions f,
 }
 
 template <str_const shorthand, str_const name, str_const about_s, bool is_sub,
-          bool is_def, typename... Args>
-constexpr void
-Parser<shorthand, name, about_s, is_sub, is_def, Args...>::output_help(
+          typename... Args>
+constexpr void Parser<shorthand, name, about_s, is_sub, Args...>::output_help(
     std::output_iterator<char const &> auto it, FormatOptions o) {
   using std::fill_n;
-  using This = Parser<shorthand, name, about_s, is_sub, is_def, Args...>;
+  using This = Parser<shorthand, name, about_s, is_sub, Args...>;
   auto out = [&](std::string_view s) {
     it = std::copy(s.begin(), s.end(), it);
   };
@@ -620,10 +627,9 @@ Parser<shorthand, name, about_s, is_sub, is_def, Args...>::output_help(
 }
 
 template <str_const shorthand, str_const name, str_const about_s, bool is_sub,
-          bool is_def, typename... Args>
+          typename... Args>
 constexpr std::string
-Parser<shorthand, name, about_s, is_sub, is_def, Args...>::help(
-    FormatOptions o) {
+Parser<shorthand, name, about_s, is_sub, Args...>::help(FormatOptions o) {
   std::string s;
   output_help(std::back_inserter(s), o);
   return s;

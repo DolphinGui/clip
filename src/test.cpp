@@ -4,6 +4,7 @@
 
 #include <concepts>
 #include <optional>
+#include <print>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -22,18 +23,20 @@ using clip::Subcommand;
 
 template <typename T> using Opt = std::optional<T>;
 using Str = std::string;
-using Args = std::vector<std::string_view>;
+using Args = std::vector<std::string>;
 
 TEST_CASE("Basic flag and positional parsing") {
   constexpr auto cmd =
       Command<none, "basic">{}
+          .arg(help_arg)
           .arg(Argument<Str, positional, none, "firstarg">{})
-          .arg(Argument<Opt<Str>, flag, "o", "output">{})
           .arg(Argument<Str, positional, none, "secondarg", none, false>{})
-          .arg(Argument<bool, flag, "b", "binary">{});
+          .arg(Argument<bool, flag, "b", "binary">{})
+          .arg(Argument<Opt<Str>, flag, "o", "output">{});
   SECTION("Parsing basic positional args") {
     Args as = {"first", "second"};
-    auto [first, output, second, binary] = cmd.parse(as);
+    auto [help, first, second, binary, output] = cmd.parse(as);
+    TYPE_ASSERT(help, bool);
     TYPE_ASSERT(first, Str);
     TYPE_ASSERT(second, Str);
     TYPE_ASSERT(output, Opt<Str>);
@@ -47,7 +50,7 @@ TEST_CASE("Basic flag and positional parsing") {
 
   SECTION("Parsing flags and arguments at the same time") {
     Args as = {"-o", "out", "first", "second", "--binary"};
-    auto [first, output, second, binary] = cmd.parse(as);
+    auto [help, first, second, binary, output] = cmd.parse(as);
 
     REQUIRE(first == "first");
     REQUIRE(second == "second");
@@ -55,12 +58,34 @@ TEST_CASE("Basic flag and positional parsing") {
     REQUIRE(output.value() == "out");
     REQUIRE(binary == true);
   }
+
+  SECTION("Parsing invalid options") {
+    Args a = {"-output"};
+    REQUIRE_THROWS_AS(cmd.parse(a), clip::parse_error);
+    Args b = {"-help"};
+    REQUIRE_THROWS(cmd.parse(b));
+    Args c = {"-fdas"};
+    REQUIRE_THROWS(cmd.parse(c));
+    Args d = {"--out"
+              "--binary"};
+    REQUIRE_THROWS_AS(cmd.parse(d), clip::parse_error);
+  }
+
+  SECTION("Parsing gnu-style flags") {
+    Args a = {"-hbo", "file.txt"};
+    auto [help, first, second, binary, output] = cmd.parse(a);
+    REQUIRE(help == true);
+    REQUIRE(first.empty());
+    REQUIRE(output.value() == "file.txt");
+    REQUIRE(second.empty());
+    REQUIRE(binary == true);
+  }
 }
 
 TEST_CASE("Subcommand parsing") {
   constexpr auto list = Subcommand<"l", "list", none>{}.arg(help_arg);
   constexpr auto search =
-      Subcommand<"se", "search", none, true>{}
+      Subcommand<"se", "search", none>{}
           .arg(help_arg)
           .arg(Argument<Opt<Str>, positional, none, "TERM">{})
           .arg(Argument<bool, flag, "r", "regex">{});
@@ -93,18 +118,6 @@ TEST_CASE("Subcommand parsing") {
     REQUIRE(!search.has_value());
     auto [_h, l, _s] = cmd.parse(as2);
     REQUIRE(l == list);
-  }
-
-  SECTION("Parsing default subcommand") {
-    Args as = {"term", "-r"};
-    auto [_h, list, search] = cmd.parse(as);
-    auto [help, term, regex] = search.value_or({});
-
-    REQUIRE(!list.has_value());
-    REQUIRE(search.has_value());
-    REQUIRE(help == false);
-    REQUIRE(regex == true);
-    REQUIRE(term == "term");
   }
 
   SECTION("Testing help") {
