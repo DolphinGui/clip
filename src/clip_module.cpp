@@ -22,6 +22,7 @@ using clip::none;
 using clip::positional;
 
 namespace comp {
-using clip::comp::zsh_completer;
+using clip::comp::Zsh;
+using clip::comp::complete_zsh;
 }
 } // namespace clip
